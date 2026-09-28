@@ -1,0 +1,25 @@
+# 本地 Agent 技能（软链接到本机 skillcaddy，不进库）
+.agents/
+.claude/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 真实健康数据与备份（只存本地，不进 git）
+*.backup.json
+*backup*.json
+exports/
+backups/
+data/
+*.csv
+!docs/**/*.csv
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
