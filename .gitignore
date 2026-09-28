@@ -2,6 +2,10 @@
 .agents/
 .claude/
 
+# Node.js toolchain
+node_modules/
+dist/
+
 # macOS
 .DS_Store
 .AppleDouble
