@@ -1,0 +1,220 @@
+# 轻盈计划独立部署 Web 页面：第一版
+
+Status: ready-for-agent
+
+输入依据：初期需求文档、现有两个 HTML 实现及后续需求澄清  
+目标版本：第一版独立部署  
+决策状态：架构方向已收敛；部署平台和历史数据文件格式在实施前确认
+
+## Problem Statement
+
+现有「轻盈计划 · 减脂健身追踪台」依托 Workbuddy 的托管环境和页面数据库 SDK。Workbuddy 的账号数量及网络环境限制，使页面无法作为长期、稳定、可自由部署的个人健康记录工具。现有实现虽然已经具备体重、体脂、围度、步数、训练与习惯打卡、饮食、趋势图、日历、导入导出等完整功能，但页面、存储、平台身份和云端同步逻辑混在两个大型单文件 HTML 中，离开 Workbuddy 后部分能力失去运行基础。
+
+第一版需要把应用变成可部署到任意静态站点的单用户 Web 应用，以浏览器本地数据为事实来源，允许一次性导入腾讯云文档中的历史记录，并保留完整备份和恢复能力。腾讯云文档在迁移完成后退出运行时链路，不接 API、MCP 或自动同步。
+
+用户还希望分享页面时只有本人能够编辑，其他人只能查看。纯 `localStorage` 数据无法随网址分享：访问者只会看到自己浏览器中的数据。因此设计必须区分本人的可编辑数据与对外发布的只读数据，不能把前端密码框误当成真正的数据安全边界。
+
+## Solution
+
+第一版建设一个不依赖 Workbuddy 的静态单页应用，保留现有视觉风格和核心健康追踪能力。应用通过统一的“健康数据仓库”接口访问数据，首个实现使用浏览器本地存储；页面和业务计算不直接读写 `localStorage`。未来增加 SQLite、Supabase 或 Cloudflare D1 时，只替换数据仓库实现，不重写页面规则。
+
+应用提供两种明确的运行形态：
+
+1. **本人模式**：本地数据是权威数据，用户可新增、修改、删除、导入、导出和配置。编辑会话可以通过本地验证减少共享设备上的误操作，但它属于界面保护，不被描述为服务端安全认证。
+2. **只读发布模式**：页面读取一份由本人主动生成的只读快照。该模式不加载写入能力，不提供新增、修改、删除、导入、清空或设置变更入口。访问者无法通过页面写回本人的本地数据。
+
+历史数据通过文件完成一次性迁移。导入流程先解析和校验，在不触碰当前数据的情况下展示记录数量、错误和冲突；本人确认后才以一次完整提交替换或合并本地快照。每次破坏性导入或清空前保留一个本地恢复点，失败时继续使用原数据。
+
+JSON 是完整备份与恢复格式，保存设置、所有记录、稳定 ID、时间戳和数据版本。CSV 是面向人工检查和腾讯云文档历史数据迁移的交换格式，每类数据使用独立、固定列定义。导入完成后，本地健康数据成为事实来源，腾讯云文档不再参与读写。
+
+## User Stories
+
+1. 作为本人用户，我希望通过独立托管的网址打开应用，以便不再受到 Workbuddy 托管限制。
+2. 作为本人用户，我希望应用不依赖任何 Workbuddy 全局对象或注入脚本，以便在普通现代浏览器中运行。
+3. 作为本人用户，我希望第一版把健康数据保存在本机浏览器中，以便无需先配置后端即可使用。
+4. 作为本人用户，我希望现有设置和记录进入一个带版本的数据模型，以便统一迁移和备份。
+5. 作为本人用户，我希望按日期记录体重和可选体脂率，以便追踪体重变化。
+6. 作为本人用户，我希望每个日期最多有一条体重记录，以便每日趋势计算没有歧义。
+7. 作为本人用户，我希望记录腰围和臀围，以便观察身体围度变化。
+8. 作为本人用户，我希望腰臀比由腰围和臀围自动计算，以免派生值与原始测量值不一致。
+9. 作为本人用户，我希望记录每日步数和备注，以便对照活动目标。
+10. 作为本人用户，我希望每个日期最多有一条步数记录，以便每日总数和图表结果确定。
+11. 作为本人用户，我希望按日期完成训练和习惯打卡，以便观察计划执行情况。
+12. 作为本人用户，我希望在同一日期和餐次添加多条食物，以免重复食物被错误合并。
+13. 作为本人用户，我希望维护饮食记录的热量、蛋白质、脂肪、碳水、钠和备注，以便计算每日营养总量。
+14. 作为本人用户，我希望 BMI、BMR、TDEE 和营养目标从设置和记录中计算，以便派生结果始终与输入一致。
+15. 作为本人用户，我希望看到今天尚未完成的体重、训练、习惯和步数事项，以便直接采取行动。
+16. 作为本人用户，我希望查看体重、体脂、围度和步数趋势，以便判断一段时间内的变化。
+17. 作为本人用户，我希望按日历日期查看记录，以便还原某一天的活动和饮食。
+18. 作为本人用户，我希望编辑和删除已有记录，以便纠正错误。
+19. 作为本人用户，我希望破坏性操作必须再次确认，以免误触造成数据丢失。
+20. 作为本人用户，我希望替换或清空数据前保存可恢复快照，以便错误导入或误清空后能够回退。
+21. 作为本人用户，我希望明确看到存储失败，以免容量已满、存储受限或数据损坏却被误认为保存成功。
+22. 作为本人用户，我希望导出完整 JSON 备份，以便恢复时不丢失设置和记录身份。
+23. 作为本人用户，我希望分别导出各类记录的 CSV，以便使用常见工具检查和处理数据。
+24. 作为本人用户，我希望一次性导入腾讯云文档的历史导出数据，以便保存历史记录而无需长期维护腾讯集成。
+25. 作为本人用户，我希望导入校验在当前数据变化前完成，以免错误行造成部分数据污染。
+26. 作为本人用户，我希望导入前预览接受、拒绝和冲突的记录数量，以便确认前了解影响。
+27. 作为本人用户，我希望重复日期和冲突记录按明确规则处理，以便重复导入的结果可预测。
+28. 作为本人用户，我希望导入失败时当前快照完全不变，以便迁移对我表现为一次原子操作。
+29. 作为本人用户，我希望看到当前存储类型以及最近保存和备份时间，以便知道数据位于哪里。
+30. 作为本人用户，我希望在长期没有完整备份时收到提醒，以免浏览器存储悄悄成为唯一副本。
+31. 作为本人用户，我希望生成只读发布快照，以便分享选定的看板数据且不暴露写权限。
+32. 作为本人用户，我希望发布必须由我主动触发，以免本地变化意外公开。
+33. 作为本人用户，我希望发布快照包含生成时间，以便访问者判断数据是否新鲜。
+34. 作为本人用户，我希望发布数据排除编辑凭据、待处理操作和恢复快照，以免内部状态泄露。
+35. 作为只读访问者，我希望无需账号即可打开分享页面，以便简单查看。
+36. 作为只读访问者，我希望只读模式完全没有变更控件，以免页面暗示我可以修改数据。
+37. 作为只读访问者，我希望看到数据最后发布时间，以免把旧快照误认为实时数据。
+38. 作为在共享设备上使用的本人用户，我希望应用默认只读，并在本地验证后才允许编辑，以免其他人通过界面随意修改记录。
+39. 作为本人用户，我希望编辑权限在当前浏览器会话内自动到期，以便无人使用的页面恢复只读。
+40. 作为本人用户，我希望静态资源加载完成后应用可以离线工作，以免断网阻止本地记录。
+41. 作为未来维护者，我希望存储细节隔离在一个稳定契约后面，以便以后接入 SQLite 或云存储时不改变健康计算和页面行为。
+42. 作为未来维护者，我希望持久化数据包含结构版本和迁移机制，以便新版本安全读取旧数据。
+43. 作为未来维护者，我希望迁移验证完成后删除废弃的 Workbuddy 路径，以免失效的云同步逻辑被意外重新启用。
+
+## Implementation Decisions
+
+### 1. Application boundary
+
+- The first version is a standards-based static single-page application deployable on any HTTPS static host.
+- Frontend application, domain model, storage contract, import validation and read-only publication code use TypeScript with strict type checking.
+- Node.js is the development, build, browser-test and migration-tool runtime. The first-version production output is static assets and does not run a Node.js server.
+- If a future backend is authorized, Node.js is the preferred backend runtime; that decision does not expand the first-version scope.
+- Workbuddy injection, Workbuddy database IDs, platform-host detection, pending Workbuddy operations and cloud polling are retired from the runtime path.
+- The existing page is treated as behavioral and visual reference, not as the target module structure.
+- The application may be built from separate UI, domain, persistence, migration and publication modules; deployment still produces static assets.
+- The first implementation preserves the current Chinese interface, mobile layout, dashboard structure and core calculations unless a behavior conflicts with this specification.
+
+### 2. Authority and ownership
+
+- In本人模式, the accepted local application snapshot is the fact authority for settings and health records.
+- Import files are proposals until validation and explicit confirmation complete; they never become authoritative merely by being selected.
+- A published read-only snapshot is a projection of the local snapshot. It is not a writable replica and never becomes the fact authority.
+- Tencent documents are migration sources only. Once migration is accepted, corrections are made in the independent application rather than written back to Tencent documents.
+- Derived metrics such as BMI, BMR, TDEE, waist-to-hip ratio, moving averages and progress percentages are projections calculated from authoritative settings and records.
+
+### 3. Health data model
+
+- A top-level application snapshot contains a schema version, application metadata, owner settings and collections for weights, measurements, steps, check-ins and diets.
+- Persisted records use stable application-generated IDs plus `createdAt` and `updatedAt` timestamps. Import preserves valid IDs when safe and generates IDs when the source has none.
+- Dates use local calendar form `YYYY-MM-DD`. Timestamps use ISO 8601 UTC values.
+- Weight uniqueness is by record date.
+- Measurement uniqueness is by record date. Waist-to-hip ratio is computed rather than accepted as independent truth.
+- Step uniqueness is by record date.
+- Check-in uniqueness is by date, type and item name.
+- Diet records are identified by stable ID. Date, meal and food text are not a uniqueness key because a user may legitimately record the same food more than once.
+- Numeric values are normalized at admission. Invalid, non-finite and out-of-range values are rejected with a record-level error.
+- Settings contain owner display name, body inputs, targets, activity factor, nutrition targets, theme, training plan and habit definitions.
+- Storage-specific fields, credentials, browser handles and synchronization state do not enter the domain snapshot.
+
+### 4. Storage contract
+
+- UI and domain behavior access persistence through one application-level health data repository.
+- The repository contract loads the current snapshot, commits a complete validated snapshot, reports storage status and manages one recovery snapshot.
+- A commit succeeds only after the entire snapshot is serialized and accepted by the storage implementation. The UI updates its “saved” status only after this confirmation.
+- The first repository implementation uses browser local storage and checks availability, parse errors and quota errors explicitly.
+- The repository must never turn an unreadable or unavailable store into an empty successful state. It returns a degraded/error result while retaining the last valid in-memory snapshot.
+- Future SQLite, Supabase or Cloudflare D1 implementations must satisfy the same externally observable repository contract before becoming selectable.
+- Multi-store replication and live synchronization are not simulated in the first version.
+
+### 5. Local persistence and recovery
+
+- The current snapshot, previous recovery snapshot, storage metadata and local edit-session state use separate namespaces.
+- Before confirmed import replacement, migration, or full clear, the repository copies the last valid current snapshot into the recovery slot.
+- Recovery is a deliberate owner action that previews the recovery snapshot’s timestamp and counts before restoring it.
+- After a failed commit, the prior accepted snapshot remains current and the interface displays an actionable error.
+- A successful commit records the last-saved timestamp. A successful full JSON export records the last-backup timestamp locally.
+- The page warns when browser data exists but no recent full backup is recorded. The warning does not claim that an export is a synchronized replica.
+- Browser storage clearing, private-browsing eviction and device loss remain real risks; product copy states this directly.
+
+### 6. Import and migration
+
+- Full JSON backup is the lossless application interchange format and includes a schema version.
+- CSV import supports one fixed schema per record category. Column aliases from the current Tencent exports may be mapped by an explicit migration profile, not by fuzzy guessing.
+- Import runs in four stages: parse, normalize and validate, preview, then explicit commit.
+- Parsing and validation produce row-level errors without mutating current state.
+- A full JSON restore defaults to replacing the current snapshot after confirmation.
+- Category CSV import defaults to merge-by-category. Existing unique-key conflicts are shown in the preview and require one explicit policy for that import: keep current or use imported.
+- Repeating the same accepted import with the same conflict policy must not create additional weight, measurement, step or check-in records.
+- Diet imports use a migration fingerprint derived from source row identity when available; otherwise the preview treats potential duplicates as conflicts instead of silently discarding legitimate repeated meals.
+- Import commits all accepted changes as one new snapshot. Any commit failure leaves the current snapshot unchanged and preserves the recovery copy.
+- Tencent API, Tencent MCP and ongoing Tencent synchronization have no interfaces or placeholders in the first-version runtime.
+
+### 7. Editing and read-only publication
+
+- The application has an explicit runtime capability: `owner` or `reader`.
+- Reader capability removes mutation admission at the application boundary. Mutation handlers reject calls even if a control is invoked outside the visible UI.
+- Owner capability can start visually locked. Local credential verification may unlock UI editing for a time-limited session on that device.
+- A password hash shipped in static JavaScript is not described as strong authentication. It protects against casual interface use on a shared device, not a determined attacker with asset access.
+- Public sharing is enforced by publishing a reader-only artifact or configuration with no writable storage route. This is the real “others read-only” boundary.
+- Publication generates a versioned, read-only JSON projection with `publishedAt`, source schema version and selected display data.
+- Publication excludes credentials, local session state, recovery data, pending operations, internal storage metadata and unpublished notes designated private in future versions.
+- The first version may require the owner to upload or deploy the generated read-only snapshot manually. Automatic publishing requires a trusted write endpoint and is deferred.
+- A reader page displays the publication timestamp and a stale-data explanation; it never labels the projection as live synchronization.
+
+### 8. UI and behavior
+
+- The existing major sections remain: overview, goals and metabolism, calendar, trends, daily records, diet, settings and data management.
+- All mutation entry points share one edit-capability guard rather than relying only on disabled styling.
+- Read-only mode hides or disables forms, edit/delete controls, import, clear and settings mutation while retaining navigation, charts, calendar and explanatory content.
+- Storage state distinguishes at least: loading, saved locally, unsaved/error, import preview, reader snapshot and recovery available.
+- Success messages appear only after persistence succeeds.
+- Empty state, malformed storage and unsupported browser cases provide a next action rather than silently seeding or clearing data.
+- Existing hard-coded historical seeds and sample auto-insertion are removed from production startup. Test fixtures remain outside runtime data.
+
+### 9. Deployment and cutover
+
+- The application requires HTTPS for consistent browser storage, cryptography and optional file capabilities.
+- No server is required for the owner’s first-version local workflow.
+- Static hosting choice is an assembly decision and may be Cloudflare Pages, Vercel, another static host or a private web server without changing the application contract.
+- Cutover begins by exporting a verified backup from the current page and Tencent documents before importing into the independent application.
+- Migration is considered complete only after record counts, representative dates, totals and charts are checked against the source data and a new JSON backup is produced.
+- The old Workbuddy page remains a read-only fallback during verification. It is retired only after the independent snapshot and backup are verified.
+- The two current HTML files remain source evidence during implementation; they do not remain parallel production entry points after cutover.
+
+### 10. Compatibility and future storage
+
+- The persisted snapshot schema and import/export formats are public, versioned compatibility surfaces.
+- UI module boundaries and storage implementation details are private and may change while observable behavior remains stable.
+- Schema migrations are forward-only and preserve a pre-migration recovery snapshot.
+- A future remote store may introduce authentication, synchronization, version conflicts and server-side authorization only through a separate design decision.
+- Adding a remote store does not convert the current local snapshot into a silent secondary copy. Source authority, conflict policy and recovery must be declared before multi-store writing is enabled.
+
+## Testing Decisions
+
+- The primary test seam is the complete browser application running through its public UI against the health data repository contract. This is the highest seam that verifies user-visible behavior, persistence and capability boundaries together.
+- Tests assert external outcomes: rendered records and totals, persisted state after reload, exported content, visible errors, unavailable mutation controls and unchanged data after failures. They do not assert private helper functions or DOM construction details.
+- One reusable repository contract suite verifies any storage implementation: empty load, valid load, atomic commit, reload persistence, malformed stored data, quota/write failure, recovery creation and recovery restoration.
+- Owner-mode browser journeys cover creating, editing and deleting each record type; updating settings; calculations; calendar and trend projections; JSON backup; and reload persistence.
+- Reader-mode browser journeys verify that shared data renders while every mutation route is absent or rejected, including direct event invocation attempts through public application surfaces.
+- Import journeys cover valid full restore, malformed JSON, wrong schema version, row-level CSV errors, duplicate import, conflict policies, cancel-before-commit and simulated commit failure.
+- Recovery journeys verify that replacement import and clear create a recovery point, failed writes preserve the accepted snapshot, and an explicit restore returns the previous visible data.
+- Migration verification uses representative real-data fixtures with sensitive values removed. It compares source and imported counts, date ranges, daily nutrition totals and selected chart points.
+- Calculation tests use fixed inputs and expected BMI, BMR, TDEE, waist-to-hip ratio and moving-average results, including missing optional values.
+- Responsive browser checks cover the current mobile and desktop layouts, keyboard access, focus visibility and readable error states.
+- Existing code has no established automated test suite. The first implementation therefore creates the browser-level seam and repository contract suite as the project’s testing precedent.
+- The design is accepted for implementation when the chosen single primary seam matches the intended product boundary: users interact with the browser application, while storage providers remain replaceable behind the repository contract.
+
+## Out of Scope
+
+- Multi-user accounts, registration, teams, roles or collaborative editing.
+- Tencent document API integration, Tencent MCP integration or ongoing Tencent synchronization.
+- Automatic two-way or multi-store synchronization.
+- Conflict-free multi-device editing, distributed versioning or background reconciliation.
+- Supabase, Cloudflare D1, SQLite or another remote/server database in the first implementation.
+- Server-side authentication or treating a client-side password as a strong security boundary.
+- Automatic upload of a read-only publication snapshot to a hosting provider.
+- Automatic recurring file downloads, which browsers cannot perform reliably without user interaction.
+- Meal-photo recognition, AI nutrition estimation or image storage.
+- Native mobile applications, wearable-device integrations or health-platform integrations.
+- A Node.js backend service in the first implementation; Node.js is used only for the local development and build toolchain at this stage.
+- Redesigning medical formulas or presenting calculated metrics as diagnosis.
+- Importing arbitrary undocumented Tencent document layouts through heuristic column guessing.
+
+## Further Notes
+
+- The latest clarification overrides the early idea of Tencent documents as an ongoing storage option. They are a one-time migration source for this specification.
+- “Only the owner can edit” has two different strengths. A local edit lock deters accidental use on a shared device; a reader-only deployment with no mutation route enforces public read-only sharing. The UI must explain this distinction accurately.
+- Browser local storage is the first-version authority but remains a single-device risk. Full JSON backup and recovery reduce accidental loss; they do not provide multi-device durability. A later remote-storage decision should be based on actual cross-device needs.
+- The storage repository is intentionally snapshot-oriented in the first version. This matches the small single-user dataset, enables atomic import/recovery and keeps the future storage seam narrow. It should be revisited only if dataset size or remote concurrency makes full-snapshot commits unsuitable.
