@@ -46,6 +46,7 @@ describe('static application boundary', () => {
 
     expect(container.textContent).toContain('Along，今天也稳稳向前。');
     expect(container.textContent).toContain('只读 · 本地');
+    expect(container.textContent).toContain('0/4');
     expect(container.querySelectorAll('form')).toHaveLength(0);
     expect(container.querySelector('[data-action="reload"]')).not.toBeNull();
   });
