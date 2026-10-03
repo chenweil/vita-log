@@ -70,6 +70,10 @@ h2 { margin: 3px 0 0; color: var(--primary-deep); font: 700 22px Georgia, "Songt
 .body-record-form { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
 .body-record-form label, .auth-dialog label { display: grid; gap: 6px; color: var(--ink-2); font-size: 12px; }
 .body-record-form input, .auth-dialog input { width: 100%; height: 40px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: #fffdf8; font: inherit; outline: none; }
+.diet-form { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
+.diet-form label { display: grid; gap: 6px; color: var(--ink-2); font-size: 12px; }
+.diet-form input, .diet-form select { width: 100%; height: 40px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: #fffdf8; font: inherit; outline: none; }
+.diet-form input:focus, .diet-form select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
 .body-record-form input:focus, .auth-dialog input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
 .wide-field { grid-column: 1 / -1; }
 .form-actions { display: flex; align-items: center; gap: 14px; }
@@ -140,6 +144,17 @@ h2 { margin: 3px 0 0; color: var(--primary-deep); font: 700 22px Georgia, "Songt
 .activity-grid { align-items: start; }
 .history-list { margin-top: 20px; }
 .history-list h3, .checkin-group h3 { margin: 0 0 10px; color: var(--primary-deep); font: 700 16px Georgia, "Songti SC", serif; }
+.diet-summary-card { margin-top: 12px; }
+.diet-macro-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+.diet-macro-grid div { min-width: 0; }
+.diet-macro-grid span, .diet-macro-grid b { display: block; }
+.diet-macro-grid span { color: var(--ink-3); font-size: 11px; }
+.diet-macro-grid b { margin: 5px 0 7px; color: var(--ink-2); font-size: 12px; font-weight: 600; }
+.diet-macro-grid i { display: block; height: 6px; overflow: hidden; border-radius: 99px; background: var(--line-soft); }
+.diet-macro-grid em { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.diet-history-row { min-height: 58px; }
+.calendar-diet-list { display: grid; gap: 5px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-soft); color: var(--ink-2); font-size: 12px; }
+.calendar-diet-list strong { color: var(--primary-deep); font-size: 13px; }
 .checkin-group + .checkin-group { margin-top: 22px; }
 .checkin-button { display: flex; align-items: center; gap: 8px; width: 100%; margin: 6px 0; padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: 8px; color: var(--ink-2); background: #fffdf8; text-align: left; cursor: pointer; font-size: 13px; }
 .checkin-button:hover { border-color: var(--primary); }
@@ -181,6 +196,8 @@ h2 { margin: 3px 0 0; color: var(--primary-deep); font: 700 22px Georgia, "Songt
   .two-column { grid-template-columns: 1fr; }
   .card { padding: 17px; }
   .body-record-form { grid-template-columns: repeat(2, 1fr); }
+  .diet-form { grid-template-columns: repeat(2, 1fr); }
+  .diet-macro-grid { grid-template-columns: repeat(2, 1fr); }
   .history-columns { grid-template-columns: 1fr; gap: 20px; }
 }
 
@@ -202,6 +219,7 @@ h2 { margin: 3px 0 0; color: var(--primary-deep); font: 700 22px Georgia, "Songt
   .auth-button { padding: 0 8px; }
   .locked-editor { align-items: flex-start; flex-direction: column; }
   .body-record-form { grid-template-columns: 1fr; }
+  .diet-form { grid-template-columns: 1fr; }
   .wide-field { grid-column: auto; }
   .calendar-detail-head { align-items: flex-start; flex-direction: column; gap: 4px; }
   .calendar-checkins { grid-template-columns: 1fr; }

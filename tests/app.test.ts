@@ -8,6 +8,7 @@ import { StorageError, type HealthDataRepository, type LoadResult } from '../src
 
 class FakeRepository implements HealthDataRepository {
   commits: HealthSnapshot[] = [];
+  failCommits = false;
 
   constructor(private readonly result: LoadResult | StorageError) {}
 
@@ -16,7 +17,10 @@ class FakeRepository implements HealthDataRepository {
     return this.result;
   }
 
-  async commit(snapshot: HealthSnapshot): Promise<void> { this.commits.push(snapshot); }
+  async commit(snapshot: HealthSnapshot): Promise<void> {
+    if (this.failCommits) throw new StorageError('write-failed', '本地健康数据保存失败');
+    this.commits.push(snapshot);
+  }
 
   async loadRecovery(): Promise<HealthSnapshot> {
     return createEmptySnapshot();
@@ -126,6 +130,48 @@ describe('static application boundary', () => {
     await Promise.resolve();
 
     expect(container.querySelector('[aria-label="腰围与臀围趋势折线图"]')).not.toBeNull();
+  });
+
+  it('saves a diet record and shows its nutrition target summary in owner mode', async () => {
+    const container = document.createElement('div');
+    document.body.append(container);
+    const repository = new FakeRepository({ snapshot: createEmptySnapshot('2026-09-28T00:00:00.000Z'), status: 'loaded' });
+    mountApp(container, repository, new FakeAuthUnlocked());
+    await Promise.resolve();
+    const form = container.querySelector<HTMLFormElement>('#dietForm');
+    if (!form) throw new Error('diet form missing');
+    const set = (name: string, value: string): void => { const input = form.querySelector<HTMLInputElement | HTMLSelectElement>(`[name="${name}"]`); if (!input) throw new Error(`${name} missing`); input.value = value; };
+    set('food', '鸡胸肉');
+    set('calorie', '200');
+    set('protein', '35');
+    set('fat', '4');
+    set('carb', '2');
+    set('sodium', '200');
+    form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(repository.commits.at(-1)?.diets[0]).toMatchObject({ food: '鸡胸肉', calorie: 200, protein: 35 });
+    expect(container.textContent).toContain('200');
+  });
+
+  it('shows diet persistence errors in the diet form and global status', async () => {
+    const container = document.createElement('div');
+    document.body.append(container);
+    const repository = new FakeRepository({ snapshot: createEmptySnapshot('2026-09-28T00:00:00.000Z'), status: 'loaded' });
+    repository.failCommits = true;
+    mountApp(container, repository, new FakeAuthUnlocked());
+    await Promise.resolve();
+    const form = container.querySelector<HTMLFormElement>('#dietForm');
+    if (!form) throw new Error('diet form missing');
+    const set = (name: string, value: string): void => { const input = form.querySelector<HTMLInputElement | HTMLSelectElement>(`[name="${name}"]`); if (!input) throw new Error(`${name} missing`); input.value = value; };
+    set('food', '鸡胸肉'); set('calorie', '200'); set('protein', '35'); set('fat', '4'); set('carb', '2'); set('sodium', '200');
+    form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(container.querySelector('.diet-form .form-error')?.textContent).toContain('本地健康数据保存失败');
+    expect(container.textContent).toContain('本地健康数据保存失败');
   });
 });
 

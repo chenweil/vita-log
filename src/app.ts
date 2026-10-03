@@ -1,5 +1,6 @@
 import { ClientEditorAuth, type EditorAuth } from './auth';
 import { deleteStep, saveStep, toggleCheckin } from './activity-editor';
+import { deleteDiet, saveDiet } from './diet-editor';
 import { calculateBmi, calculateWhr, latestByDate, type DietRecord, type HealthSnapshot, type WeightRecord } from './domain';
 import { deleteMeasurement, deleteWeight, saveBodyRecords, type BodyRecordTarget } from './record-editor';
 import { StorageError, type HealthDataRepository, type LoadStatus } from './storage';
@@ -25,8 +26,25 @@ interface StepFormState {
   error: string;
 }
 
+interface DietFormState {
+  targetId: string | null;
+  date: string;
+  meal: string;
+  food: string;
+  calorie: string;
+  protein: string;
+  fat: string;
+  carb: string;
+  sodium: string;
+  note: string;
+  error: string;
+}
+
+type SaveErrorTarget = 'body' | 'step' | 'diet';
+
 const emptyForm = (): BodyFormState => ({ target: null, date: localDate(new Date()), weightKg: '', bodyfatPercent: '', waistCm: '', hipCm: '', note: '', error: '' });
 const emptyStepForm = (): StepFormState => ({ targetId: null, date: localDate(new Date()), steps: '', note: '', error: '' });
+const emptyDietForm = (): DietFormState => ({ targetId: null, date: localDate(new Date()), meal: '早餐', food: '', calorie: '', protein: '', fat: '', carb: '', sodium: '', note: '', error: '' });
 
 export function mountApp(container: HTMLElement, repository: HealthDataRepository, auth: EditorAuth = new ClientEditorAuth()): () => void {
   let snapshot: HealthSnapshot | null = null;
@@ -36,6 +54,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
   let authOpen = false;
   let formState = emptyForm();
   let stepForm = emptyStepForm();
+  let dietForm = emptyDietForm();
   let selectedDate = localDate(new Date());
 
   const render = (): void => {
@@ -45,7 +64,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       return;
     }
     editing = auth.isUnlocked();
-    container.innerHTML = renderDashboard(snapshot, storageState, storageMessage, editing, formState, stepForm, selectedDate, authOpen);
+    container.innerHTML = renderDashboard(snapshot, storageState, storageMessage, editing, formState, stepForm, dietForm, selectedDate, authOpen);
     bindEvents();
   };
 
@@ -71,10 +90,10 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     render();
   };
 
-  const saveSnapshot = async (next: HealthSnapshot): Promise<boolean> => {
+  const saveSnapshot = async (next: HealthSnapshot, errorTarget: SaveErrorTarget = 'body'): Promise<boolean> => {
     if (!auth.isUnlocked()) {
       editing = false;
-      formState.error = '编辑会话已失效，请重新验证';
+      setSaveError(errorTarget, '编辑会话已失效，请重新验证');
       render();
       return false;
     }
@@ -85,11 +104,18 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       storageMessage = '已保存本地快照';
       return true;
     } catch (error) {
-      formState.error = error instanceof StorageError ? error.message : '本地数据保存失败';
+      const saveError = error instanceof StorageError ? error.message : '本地数据保存失败';
+      setSaveError(errorTarget, saveError);
       storageState = 'error';
-      storageMessage = formState.error;
+      storageMessage = saveError;
       return false;
     }
+  };
+
+  const setSaveError = (target: SaveErrorTarget, message: string): void => {
+    if (target === 'step') stepForm.error = message;
+    else if (target === 'diet') dietForm.error = message;
+    else formState.error = message;
   };
 
   const submitBodyForm = async (event: SubmitEvent): Promise<void> => {
@@ -158,7 +184,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     stepForm = { ...stepForm, date: String(data.get('date') ?? ''), steps: String(data.get('steps') ?? ''), note: String(data.get('note') ?? ''), error: '' };
     const result = saveStep(snapshot, { date: stepForm.date, steps: Number(stepForm.steps), note: stepForm.note }, stepForm.targetId, new Date().toISOString());
     if (!result.ok) { stepForm.error = result.error; render(); return; }
-    if (await saveSnapshot(result.snapshot)) stepForm = emptyStepForm();
+    if (await saveSnapshot(result.snapshot, 'step')) stepForm = emptyStepForm();
     render();
   };
 
@@ -172,7 +198,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     const date = element.dataset.date ?? selectedDate;
     const type = element.dataset.type as 'train' | 'habit' | undefined;
     if (action === 'toggle-checkin' && type) {
-      if (await saveSnapshot(toggleCheckin(snapshot, date, type, element.dataset.item ?? '', new Date().toISOString()))) render();
+      if (await saveSnapshot(toggleCheckin(snapshot, date, type, element.dataset.item ?? '', new Date().toISOString()), 'step')) render();
       return;
     }
     const id = element.dataset.id ?? '';
@@ -185,7 +211,36 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     }
     if (action === 'delete-step') {
       if (!window.confirm('确定删除这条步数记录吗？')) return;
-      if (await saveSnapshot(deleteStep(snapshot, id, new Date().toISOString()))) render();
+      if (await saveSnapshot(deleteStep(snapshot, id, new Date().toISOString()), 'step')) render();
+    }
+  };
+
+  const submitDietForm = async (event: SubmitEvent): Promise<void> => {
+    event.preventDefault();
+    if (!snapshot || !auth.isUnlocked()) { editing = false; render(); return; }
+    const form = event.currentTarget as HTMLFormElement;
+    const data = new FormData(form);
+    dietForm = { ...dietForm, date: String(data.get('date') ?? ''), meal: String(data.get('meal') ?? ''), food: String(data.get('food') ?? ''), calorie: String(data.get('calorie') ?? ''), protein: String(data.get('protein') ?? ''), fat: String(data.get('fat') ?? ''), carb: String(data.get('carb') ?? ''), sodium: String(data.get('sodium') ?? ''), note: String(data.get('note') ?? ''), error: '' };
+    const number = (value: string): number => value.trim() === '' ? Number.NaN : Number(value);
+    const result = saveDiet(snapshot, { date: dietForm.date, meal: dietForm.meal, food: dietForm.food, calorie: number(dietForm.calorie), protein: number(dietForm.protein), fat: number(dietForm.fat), carb: number(dietForm.carb), sodium: number(dietForm.sodium), note: dietForm.note }, dietForm.targetId, new Date().toISOString());
+    if (!result.ok) { dietForm.error = result.error; render(); return; }
+    if (dietForm.targetId && !window.confirm('确定保存对这条饮食记录的修改吗？')) { render(); return; }
+    if (await saveSnapshot(result.snapshot, 'diet')) dietForm = emptyDietForm();
+    render();
+  };
+
+  const handleDietAction = async (action: string, id: string): Promise<void> => {
+    if (!snapshot || !auth.isUnlocked()) { editing = false; render(); return; }
+    if (action === 'edit-diet') {
+      const record = snapshot.diets.find((item) => item.id === id);
+      if (!record) return;
+      dietForm = { targetId: record.id, date: record.date, meal: record.meal, food: record.food, calorie: String(record.calorie), protein: String(record.protein), fat: String(record.fat), carb: String(record.carb), sodium: String(record.sodium), note: record.note, error: '' };
+      render();
+      return;
+    }
+    if (action === 'delete-diet') {
+      if (!window.confirm('确定删除这条饮食记录吗？')) return;
+      if (await saveSnapshot(deleteDiet(snapshot, id, new Date().toISOString()), 'diet')) render();
     }
   };
 
@@ -206,10 +261,13 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     }));
     container.querySelectorAll<HTMLFormElement>('#bodyRecordForm').forEach((form) => form.addEventListener('submit', (event) => { void submitBodyForm(event); }));
     container.querySelectorAll<HTMLFormElement>('#stepForm').forEach((form) => form.addEventListener('submit', (event) => { void submitStepForm(event); }));
+    container.querySelectorAll<HTMLFormElement>('#dietForm').forEach((form) => form.addEventListener('submit', (event) => { void submitDietForm(event); }));
     container.querySelectorAll<HTMLElement>('[data-action="reset-body-form"]').forEach((button) => button.addEventListener('click', () => { formState = emptyForm(); render(); }));
     container.querySelectorAll<HTMLElement>('[data-action="edit-weight"], [data-action="edit-measurement"], [data-action="delete-weight"], [data-action="delete-measurement"]').forEach((button) => button.addEventListener('click', () => { void handleRecordAction(button.dataset.action ?? '', button.dataset.id ?? ''); }));
     container.querySelectorAll<HTMLElement>('[data-action="calendar-day"], [data-action="toggle-checkin"], [data-action="edit-step"], [data-action="delete-step"]').forEach((button) => button.addEventListener('click', () => { void handleActivityAction(button.dataset.action ?? '', button); }));
     container.querySelectorAll<HTMLElement>('[data-action="reset-step-form"]').forEach((button) => button.addEventListener('click', () => { stepForm = emptyStepForm(); render(); }));
+    container.querySelectorAll<HTMLElement>('[data-action="edit-diet"], [data-action="delete-diet"]').forEach((button) => button.addEventListener('click', () => { void handleDietAction(button.dataset.action ?? '', button.dataset.id ?? ''); }));
+    container.querySelectorAll<HTMLElement>('[data-action="reset-diet-form"]').forEach((button) => button.addEventListener('click', () => { dietForm = emptyDietForm(); render(); }));
   };
 
   const expiryTimer = window.setInterval(() => {
@@ -220,7 +278,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
   return () => window.clearInterval(expiryTimer);
 }
 
-function renderDashboard(snapshot: HealthSnapshot, state: StorageViewState, message: string, editing: boolean, formState: BodyFormState, stepForm: StepFormState, selectedDate: string, authOpen: boolean): string {
+function renderDashboard(snapshot: HealthSnapshot, state: StorageViewState, message: string, editing: boolean, formState: BodyFormState, stepForm: StepFormState, dietForm: DietFormState, selectedDate: string, authOpen: boolean): string {
   const latestWeight = latestByDate(snapshot.weights);
   const latestMeasurement = latestByDate(snapshot.measurements);
   const bmi = latestWeight ? calculateBmi(latestWeight.weightKg, snapshot.settings.heightCm) : null;
@@ -230,7 +288,7 @@ function renderDashboard(snapshot: HealthSnapshot, state: StorageViewState, mess
   const todayDiet = snapshot.diets.filter((record) => record.date === today);
   const goalProgress = latestWeight ? progressPercent(latestWeight.weightKg, snapshot.settings.startWeightKg, snapshot.settings.targetWeightKg) : 0;
   const greeting = snapshot.settings.name ? `${snapshot.settings.name}，今天也稳稳向前。` : '今天也稳稳向前。';
-  return `<div class="app-shell"><header class="topbar"><div class="brand"><div class="brand-mark">轻</div><div><strong>轻盈计划</strong><span>个人健康记录</span></div></div><div class="top-actions"><span class="read-only-pill"><span class="status-dot"></span>${editing ? '本人编辑' : '只读 · 本地'}</span><button class="auth-button" data-action="auth-toggle" type="button">${editing ? '锁定' : '进入编辑'}</button><button class="icon-button" data-action="reload" aria-label="刷新本地数据" title="刷新本地数据">↻</button></div></header><main class="page"><section class="hero-card"><div><p class="eyebrow">DAILY CHECK-IN · ${escapeHtml(today)}</p><h1>${escapeHtml(greeting)}</h1><p class="hero-copy">把今天的记录留给自己，趋势会替你记住坚持。</p></div><div class="hero-ring" aria-label="目标进度 ${Math.round(goalProgress)}%"><span>${Math.round(goalProgress)}<small>%</small></span><em>目标进度</em></div></section><section class="section-block"><div class="section-heading"><div><p class="eyebrow">OVERVIEW · 概览</p><h2>今天的身体状态</h2></div><span class="saved-note ${state === 'error' ? 'error' : ''}">${escapeHtml(message)}</span></div><div class="metric-grid">${metricCard('当前体重', latestWeight ? `${formatNumber(latestWeight.weightKg)} <small>kg</small>` : '--', latestWeight ? latestWeight.date : '还没有记录', 'primary')}${metricCard('BMI', bmi ? formatNumber(bmi, 1) : '--', bmi ? bmiLabel(bmi) : '记录体重后显示', 'accent')}${metricCard('今日步数', todaySteps ? formatInteger(todaySteps.steps) : '--', todaySteps ? `${todaySteps.steps >= 8000 ? '已达标' : '目标 8000 步'}` : '还没有记录', 'blue')}${metricCard('今日饮食', todayDiet.length ? `${formatInteger(sum(todayDiet, 'calorie'))} <small>kcal</small>` : '--', todayDiet.length ? `${todayDiet.length} 条记录` : '还没有记录', 'amber')}</div></section>${renderEditor(snapshot, editing, formState)}${renderActivityEditor(snapshot, editing, stepForm)}<section class="two-column"><article class="card goal-card"><div class="card-heading"><div><p class="eyebrow">GOAL · 目标</p><h2>减脂进度</h2></div><span class="goal-number">${formatNumber(snapshot.settings.targetWeightKg)} <small>kg</small></span></div><div class="progress-track"><span style="width:${Math.min(100, Math.max(0, goalProgress))}%"></span></div><div class="goal-row"><span>起始体重 <b>${formatNumber(snapshot.settings.startWeightKg)} kg</b></span><span>目标体重 <b>${formatNumber(snapshot.settings.targetWeightKg)} kg</b></span></div><div class="detail-list"><div><span>最近围度</span><b>${latestMeasurement ? `${formatNumber(latestMeasurement.waistCm)} / ${formatNumber(latestMeasurement.hipCm)} cm` : '--'}</b></div><div><span>腰臀比 WHR</span><b>${whr ? formatNumber(whr, 2) : '--'}</b></div><div><span>目标体脂</span><b>${formatNumber(snapshot.settings.targetBodyfatPercent, 1)}%</b></div></div></article><article class="card today-card"><div class="card-heading"><div><p class="eyebrow">TODAY · 今日</p><h2>记录状态</h2></div><span class="status-label">${editing ? '本人编辑' : '只读预览'}</span></div>${renderTodayList(snapshot, today)}</article></section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">TREND · 趋势</p><h2>体重趋势</h2></div><span class="chart-meta">${snapshot.weights.length ? `共 ${snapshot.weights.length} 条` : '等待第一条记录'}</span></div>${renderWeightChart(snapshot.weights)}</section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">MEASURE · 围度</p><h2>腰围与臀围趋势</h2></div><span class="chart-meta">${snapshot.measurements.length ? `共 ${snapshot.measurements.length} 条` : '等待第一条记录'}</span></div>${renderMeasurementChart(snapshot.measurements)}</section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">ACTIVITY · 步数</p><h2>步数趋势</h2></div><span class="chart-meta">目标 8000 步</span></div>${renderStepChart(snapshot.steps)}</section><section class="card calendar-card"><div class="card-heading"><div><p class="eyebrow">CALENDAR · 日历</p><h2>最近 7 天</h2></div><span class="chart-meta">体重 · 步数 · 饮食 · 打卡</span></div>${renderCalendar(snapshot, today, selectedDate)}${renderCalendarDetail(snapshot, selectedDate, editing)}</section><section class="two-column lower-grid"><article class="card"><div class="card-heading"><div><p class="eyebrow">PROFILE · 设置</p><h2>当前计划</h2></div></div><div class="profile-grid"><div><span>身高</span><b>${formatNumber(snapshot.settings.heightCm)} cm</b></div><div><span>年龄</span><b>${snapshot.settings.age} 岁</b></div><div><span>热量目标</span><b>${formatInteger(snapshot.settings.calorieTarget)} kcal</b></div><div><span>蛋白质目标</span><b>${formatInteger(snapshot.settings.proteinTarget)} g</b></div></div><p class="muted">${editing ? '编辑会话已开启，保存后数据写入当前浏览器。' : '进入本人编辑模式后可以维护记录。'}</p></article><article class="card backup-card"><div class="card-heading"><div><p class="eyebrow">STORAGE · 存储</p><h2>本地数据</h2></div><span class="status-check">✓</span></div><p>当前页面使用浏览器本地快照。第一版不会向腾讯云文档或 Workbuddy 发起请求。</p><div class="data-count">${snapshot.weights.length + snapshot.measurements.length + snapshot.steps.length + snapshot.checkins.length + snapshot.diets.length}<small> 条记录</small></div><p class="muted">请定期导出完整备份，避免浏览器数据成为唯一副本。</p></article></section></main><footer class="footer">轻盈计划 · 独立静态版 <span>数据只保存在当前浏览器</span></footer>${authOpen ? renderAuthModal(formState.error) : ''}</div>`;
+  return `<div class="app-shell"><header class="topbar"><div class="brand"><div class="brand-mark">轻</div><div><strong>轻盈计划</strong><span>个人健康记录</span></div></div><div class="top-actions"><span class="read-only-pill"><span class="status-dot"></span>${editing ? '本人编辑' : '只读 · 本地'}</span><button class="auth-button" data-action="auth-toggle" type="button">${editing ? '锁定' : '进入编辑'}</button><button class="icon-button" data-action="reload" aria-label="刷新本地数据" title="刷新本地数据">↻</button></div></header><main class="page"><section class="hero-card"><div><p class="eyebrow">DAILY CHECK-IN · ${escapeHtml(today)}</p><h1>${escapeHtml(greeting)}</h1><p class="hero-copy">把今天的记录留给自己，趋势会替你记住坚持。</p></div><div class="hero-ring" aria-label="目标进度 ${Math.round(goalProgress)}%"><span>${Math.round(goalProgress)}<small>%</small></span><em>目标进度</em></div></section><section class="section-block"><div class="section-heading"><div><p class="eyebrow">OVERVIEW · 概览</p><h2>今天的身体状态</h2></div><span class="saved-note ${state === 'error' ? 'error' : ''}">${escapeHtml(message)}</span></div><div class="metric-grid">${metricCard('当前体重', latestWeight ? `${formatNumber(latestWeight.weightKg)} <small>kg</small>` : '--', latestWeight ? latestWeight.date : '还没有记录', 'primary')}${metricCard('BMI', bmi ? formatNumber(bmi, 1) : '--', bmi ? bmiLabel(bmi) : '记录体重后显示', 'accent')}${metricCard('今日步数', todaySteps ? formatInteger(todaySteps.steps) : '--', todaySteps ? `${todaySteps.steps >= 8000 ? '已达标' : '目标 8000 步'}` : '还没有记录', 'blue')}${metricCard('今日饮食', todayDiet.length ? `${formatInteger(sum(todayDiet, 'calorie'))} <small>kcal</small>` : '--', todayDiet.length ? `${todayDiet.length} 条记录` : '还没有记录', 'amber')}</div></section>${renderEditor(snapshot, editing, formState)}${renderDietEditor(snapshot, editing, dietForm, selectedDate)}${renderActivityEditor(snapshot, editing, stepForm)}<section class="two-column"><article class="card goal-card"><div class="card-heading"><div><p class="eyebrow">GOAL · 目标</p><h2>减脂进度</h2></div><span class="goal-number">${formatNumber(snapshot.settings.targetWeightKg)} <small>kg</small></span></div><div class="progress-track"><span style="width:${Math.min(100, Math.max(0, goalProgress))}%"></span></div><div class="goal-row"><span>起始体重 <b>${formatNumber(snapshot.settings.startWeightKg)} kg</b></span><span>目标体重 <b>${formatNumber(snapshot.settings.targetWeightKg)} kg</b></span></div><div class="detail-list"><div><span>最近围度</span><b>${latestMeasurement ? `${formatNumber(latestMeasurement.waistCm)} / ${formatNumber(latestMeasurement.hipCm)} cm` : '--'}</b></div><div><span>腰臀比 WHR</span><b>${whr ? formatNumber(whr, 2) : '--'}</b></div><div><span>目标体脂</span><b>${formatNumber(snapshot.settings.targetBodyfatPercent, 1)}%</b></div></div></article><article class="card today-card"><div class="card-heading"><div><p class="eyebrow">TODAY · 今日</p><h2>记录状态</h2></div><span class="status-label">${editing ? '本人编辑' : '只读预览'}</span></div>${renderTodayList(snapshot, today)}</article></section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">TREND · 趋势</p><h2>体重趋势</h2></div><span class="chart-meta">${snapshot.weights.length ? `共 ${snapshot.weights.length} 条` : '等待第一条记录'}</span></div>${renderWeightChart(snapshot.weights)}</section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">MEASURE · 围度</p><h2>腰围与臀围趋势</h2></div><span class="chart-meta">${snapshot.measurements.length ? `共 ${snapshot.measurements.length} 条` : '等待第一条记录'}</span></div>${renderMeasurementChart(snapshot.measurements)}</section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">ACTIVITY · 步数</p><h2>步数趋势</h2></div><span class="chart-meta">目标 8000 步</span></div>${renderStepChart(snapshot.steps)}</section><section class="card calendar-card"><div class="card-heading"><div><p class="eyebrow">CALENDAR · 日历</p><h2>最近 7 天</h2></div><span class="chart-meta">体重 · 步数 · 饮食 · 打卡</span></div>${renderCalendar(snapshot, today, selectedDate)}${renderCalendarDetail(snapshot, selectedDate, editing)}</section><section class="two-column lower-grid"><article class="card"><div class="card-heading"><div><p class="eyebrow">PROFILE · 设置</p><h2>当前计划</h2></div></div><div class="profile-grid"><div><span>身高</span><b>${formatNumber(snapshot.settings.heightCm)} cm</b></div><div><span>年龄</span><b>${snapshot.settings.age} 岁</b></div><div><span>热量目标</span><b>${formatInteger(snapshot.settings.calorieTarget)} kcal</b></div><div><span>蛋白质目标</span><b>${formatInteger(snapshot.settings.proteinTarget)} g</b></div></div><p class="muted">${editing ? '编辑会话已开启，保存后数据写入当前浏览器。' : '进入本人编辑模式后可以维护记录。'}</p></article><article class="card backup-card"><div class="card-heading"><div><p class="eyebrow">STORAGE · 存储</p><h2>本地数据</h2></div><span class="status-check">✓</span></div><p>当前页面使用浏览器本地快照。第一版不会向腾讯云文档或 Workbuddy 发起请求。</p><div class="data-count">${snapshot.weights.length + snapshot.measurements.length + snapshot.steps.length + snapshot.checkins.length + snapshot.diets.length}<small> 条记录</small></div><p class="muted">请定期导出完整备份，避免浏览器数据成为唯一副本。</p></article></section></main><footer class="footer">轻盈计划 · 独立静态版 <span>数据只保存在当前浏览器</span></footer>${authOpen ? renderAuthModal(formState.error) : ''}</div>`;
 }
 
 function renderEditor(snapshot: HealthSnapshot, editing: boolean, form: BodyFormState): string {
@@ -253,6 +311,24 @@ function renderActivityEditor(snapshot: HealthSnapshot, editing: boolean, form: 
   const steps = [...snapshot.steps].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
   if (!editing) return `<section class="editor-section"><div class="section-heading"><div><p class="eyebrow">ACTIVITY · 活动</p><h2>步数与打卡</h2></div></div><article class="card editor-card locked-editor"><div><p class="muted">当前为只读模式。进入本人编辑模式后可以记录步数和训练习惯打卡。</p></div><button class="primary-button" data-action="auth-toggle" type="button">进入编辑模式</button></article></section>`;
   return `<section class="editor-section"><div class="section-heading"><div><p class="eyebrow">ACTIVITY · 活动</p><h2>步数与打卡</h2></div><span class="saved-note">${form.targetId ? '正在编辑步数' : '今日活动'}</span></div><div class="two-column activity-grid"><article class="card editor-card"><div class="card-heading"><div><p class="eyebrow">${form.targetId ? 'EDIT · 编辑' : 'ADD · 新增'}</p><h2>${form.targetId ? '编辑步数' : '记录步数'}</h2></div>${form.targetId ? '<button class="text-button" data-action="reset-step-form" type="button">取消编辑</button>' : ''}</div><form id="stepForm" class="body-record-form"><label>日期<input name="date" type="date" required value="${escapeHtml(form.date)}"></label><label>步数<input name="steps" type="number" min="0" max="200000" step="1" required placeholder="如 8500" value="${escapeHtml(form.steps)}"></label><label>备注<input name="note" maxlength="80" placeholder="如 公园散步" value="${escapeHtml(form.note)}"></label><div class="form-actions wide-field"><button class="primary-button" type="submit">${form.targetId ? '保存修改' : '保存步数'}</button>${form.error ? `<span class="form-error" role="alert">${escapeHtml(form.error)}</span>` : ''}</div></form><div class="history-list"><h3>最近步数</h3>${steps.length ? steps.map((record) => `<div class="history-row"><div><b>${record.date}</b><span>${formatInteger(record.steps)} 步${record.note ? ` · ${escapeHtml(record.note)}` : ''}</span></div><div class="row-actions"><button class="text-button" data-action="edit-step" data-id="${escapeHtml(record.id)}" type="button">编辑</button><button class="text-button danger-text" data-action="delete-step" data-id="${escapeHtml(record.id)}" type="button">删除</button></div></div>`).join('') : '<p class="muted">还没有步数记录。</p>'}</div></article><article class="card editor-card"><div class="card-heading"><div><p class="eyebrow">CHECK-IN · 打卡</p><h2>今日计划</h2></div></div><div class="checkin-group"><h3>训练</h3>${trains.length ? trains.map((item) => checkinButton(snapshot, today, 'train', item)).join('') : '<p class="muted">今天没有训练计划。</p>'}</div><div class="checkin-group"><h3>习惯</h3>${habits.map((item) => checkinButton(snapshot, today, 'habit', item)).join('')}</div></article></div></section>`;
+}
+
+function renderDietEditor(snapshot: HealthSnapshot, editing: boolean, form: DietFormState, selectedDate: string): string {
+  const todayDiets = snapshot.diets.filter((record) => record.date === selectedDate);
+  const totals = todayDiets.reduce((sum, record) => ({ calorie: sum.calorie + record.calorie, protein: sum.protein + record.protein, fat: sum.fat + record.fat, carb: sum.carb + record.carb, sodium: sum.sodium + record.sodium }), { calorie: 0, protein: 0, fat: 0, carb: 0, sodium: 0 });
+  const target = snapshot.settings;
+  const mealOptions = ['早餐', '午餐', '晚餐', '加餐'];
+  const recent = [...snapshot.diets].sort((a, b) => b.date.localeCompare(a.date) || b.updatedAt.localeCompare(a.updatedAt)).slice(0, 12);
+  if (!editing) return `<section class="editor-section"><div class="section-heading"><div><p class="eyebrow">DIET · 饮食</p><h2>每日饮食记录</h2></div></div><article class="card editor-card locked-editor"><div><p class="muted">当前为只读模式。进入本人编辑模式后可以维护食物和营养数据。</p></div><button class="primary-button" data-action="auth-toggle" type="button">进入编辑模式</button></article><article class="card diet-summary-card">${renderDietSummary(totals, target, selectedDate)}</article></section>`;
+  return `<section class="editor-section"><div class="section-heading"><div><p class="eyebrow">DIET · 饮食</p><h2>每日饮食记录</h2></div><span class="saved-note">${form.targetId ? '正在编辑饮食记录' : `查看 ${selectedDate} 饮食`}</span></div><article class="card editor-card"><div class="card-heading"><div><p class="eyebrow">${form.targetId ? 'EDIT · 编辑' : 'ADD · 添加'}</p><h2>${form.targetId ? '编辑饮食记录' : '添加饮食记录'}</h2></div>${form.targetId ? '<button class="text-button" data-action="reset-diet-form" type="button">取消编辑</button>' : ''}</div><form id="dietForm" class="diet-form"><label>日期<input name="date" type="date" required value="${escapeHtml(form.date)}"></label><label>餐次<select name="meal">${mealOptions.map((meal) => `<option value="${meal}" ${meal === form.meal ? 'selected' : ''}>${meal}</option>`).join('')}</select></label><label class="wide-field">食物<input name="food" required maxlength="100" placeholder="如 鸡胸肉沙拉" value="${escapeHtml(form.food)}"></label><label>热量（kcal）<input name="calorie" type="number" min="0" step="0.1" required value="${escapeHtml(form.calorie)}"></label><label>蛋白质（g）<input name="protein" type="number" min="0" step="0.1" required value="${escapeHtml(form.protein)}"></label><label>脂肪（g）<input name="fat" type="number" min="0" step="0.1" required value="${escapeHtml(form.fat)}"></label><label>碳水（g）<input name="carb" type="number" min="0" step="0.1" required value="${escapeHtml(form.carb)}"></label><label>钠（mg）<input name="sodium" type="number" min="0" step="0.1" required value="${escapeHtml(form.sodium)}"></label><label class="wide-field">备注<input name="note" maxlength="100" value="${escapeHtml(form.note)}"></label><div class="form-actions wide-field"><button class="primary-button" type="submit">${form.targetId ? '保存修改' : '保存记录'}</button>${form.error ? `<span class="form-error" role="alert">${escapeHtml(form.error)}</span>` : ''}</div></form></article><article class="card diet-summary-card">${renderDietSummary(totals, target, selectedDate)}</article><article class="card history-card"><div class="card-heading"><div><p class="eyebrow">RECENT · 最近饮食</p><h2>饮食明细</h2></div><span class="chart-meta">${snapshot.diets.length} 条</span></div>${recent.length ? recent.map((record) => `<div class="history-row diet-history-row"><div><b>${record.date} · ${escapeHtml(record.meal)} · ${escapeHtml(record.food)}</b><span>${formatNumber(record.calorie, 0)} kcal · P${formatNumber(record.protein, 0)} F${formatNumber(record.fat, 0)} C${formatNumber(record.carb, 0)} · Na${formatNumber(record.sodium, 0)}mg${record.note ? ` · ${escapeHtml(record.note)}` : ''}</span></div><div class="row-actions"><button class="text-button" data-action="edit-diet" data-id="${escapeHtml(record.id)}" type="button">编辑</button><button class="text-button danger-text" data-action="delete-diet" data-id="${escapeHtml(record.id)}" type="button">删除</button></div></div>`).join('') : '<p class="muted">还没有饮食记录。</p>'}</article></section>`;
+}
+
+function renderDietSummary(totals: { calorie: number; protein: number; fat: number; carb: number; sodium: number }, target: HealthSnapshot['settings'], date: string): string {
+  return `<div class="card-heading"><div><p class="eyebrow">DIET · 汇总</p><h2>${escapeHtml(date)} 营养目标进度</h2></div><span class="chart-meta">${formatNumber(totals.calorie, 0)} / ${formatInteger(target.calorieTarget)} kcal</span></div><div class="diet-macro-grid"><div><span>热量</span><b>${formatNumber(totals.calorie, 0)} / ${formatInteger(target.calorieTarget)}</b><i><em style="width:${progressWidth(totals.calorie, target.calorieTarget)}%"></em></i></div><div><span>蛋白质</span><b>${formatNumber(totals.protein, 0)} / ${formatInteger(target.proteinTarget)} g</b><i><em style="width:${progressWidth(totals.protein, target.proteinTarget)}%"></em></i></div><div><span>脂肪</span><b>${formatNumber(totals.fat, 0)} / ${formatInteger(target.fatTarget)} g</b><i><em style="width:${progressWidth(totals.fat, target.fatTarget)}%"></em></i></div><div><span>碳水</span><b>${formatNumber(totals.carb, 0)} / ${formatInteger(target.carbTarget)} g</b><i><em style="width:${progressWidth(totals.carb, target.carbTarget)}%"></em></i></div><div><span>钠</span><b>${formatNumber(totals.sodium, 0)} / ${formatInteger(target.sodiumTarget)} mg</b><i><em style="width:${progressWidth(totals.sodium, target.sodiumTarget)}%"></em></i></div></div>`;
+}
+
+function progressWidth(value: number, target: number): number {
+  return target > 0 ? Math.min(100, Math.max(0, (value / target) * 100)) : 0;
 }
 
 function checkinButton(snapshot: HealthSnapshot, date: string, type: 'train' | 'habit', item: string): string {
@@ -348,11 +424,13 @@ function renderCalendarDetail(snapshot: HealthSnapshot, date: string, editing: b
   const weight = snapshot.weights.find((record) => record.date === date);
   const step = snapshot.steps.find((record) => record.date === date);
   const dietCount = snapshot.diets.filter((record) => record.date === date).length;
+  const dietItems = snapshot.diets.filter((record) => record.date === date);
+  const dietTotals = dietItems.reduce((sum, record) => ({ calorie: sum.calorie + record.calorie, protein: sum.protein + record.protein, fat: sum.fat + record.fat, carb: sum.carb + record.carb, sodium: sum.sodium + record.sodium }), { calorie: 0, protein: 0, fat: 0, carb: 0, sodium: 0 });
   const dayOfWeek = new Date(`${date}T12:00:00`).getDay();
   const trains = snapshot.settings.trainingPlan[String(dayOfWeek)] ?? [];
   const habits = snapshot.settings.habits;
   const checkins = [...trains.map((item) => ({ type: 'train' as const, item })), ...habits.map((item) => ({ type: 'habit' as const, item }))];
-  return `<div class="calendar-detail"><div class="calendar-detail-head"><strong>${safeDate}</strong><span>${weight ? `体重 ${formatNumber(weight.weightKg)} kg` : '未记录体重'} · ${step ? `${formatInteger(step.steps)} 步` : '未记录步数'} · ${dietCount} 条饮食</span></div><div class="calendar-checkins">${checkins.length ? checkins.map(({ type, item }) => { const done = snapshot.checkins.some((record) => record.date === date && record.type === type && record.item === item && record.done); return editing ? `<button class="checkin-button ${done ? 'done' : ''}" data-action="toggle-checkin" data-date="${safeDate}" data-type="${type}" data-item="${escapeHtml(item)}" type="button"><span>${done ? '✓' : '·'}</span>${escapeHtml(item)}</button>` : `<span class="checkin-readonly ${done ? 'done' : ''}">${done ? '✓' : '·'} ${escapeHtml(item)}</span>`; }).join('') : '<span class="muted">当天没有预设训练或习惯。</span>'}</div></div>`;
+  return `<div class="calendar-detail"><div class="calendar-detail-head"><strong>${safeDate}</strong><span>${weight ? `体重 ${formatNumber(weight.weightKg)} kg` : '未记录体重'} · ${step ? `${formatInteger(step.steps)} 步` : '未记录步数'} · ${dietCount} 条饮食</span></div><div class="calendar-checkins">${checkins.length ? checkins.map(({ type, item }) => { const done = snapshot.checkins.some((record) => record.date === date && record.type === type && record.item === item && record.done); return editing ? `<button class="checkin-button ${done ? 'done' : ''}" data-action="toggle-checkin" data-date="${safeDate}" data-type="${type}" data-item="${escapeHtml(item)}" type="button"><span>${done ? '✓' : '·'}</span>${escapeHtml(item)}</button>` : `<span class="checkin-readonly ${done ? 'done' : ''}">${done ? '✓' : '·'} ${escapeHtml(item)}</span>`; }).join('') : '<span class="muted">当天没有预设训练或习惯。</span>'}</div>${dietItems.length ? `<div class="calendar-diet-list"><strong>饮食明细</strong>${dietItems.map((record) => `<span>${escapeHtml(record.meal)} · ${escapeHtml(record.food)} · ${formatNumber(record.calorie, 0)} kcal</span>`).join('')}</div><div class="calendar-diet-summary">${renderDietSummary(dietTotals, snapshot.settings, date)}</div>` : ''}</div>`;
 }
 
 function renderStorageError(message: string): string {
