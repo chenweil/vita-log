@@ -5,9 +5,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#2f4a3c" />
     <title>轻盈计划 · 个人健康记录</title>
+    <style>
+      .file-launch-help { box-sizing: border-box; display: grid; place-items: center; min-height: 100vh; padding: 24px; background: #f4efe5; color: #2b2b26; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; }
+      .file-launch-card { width: min(560px, 100%); padding: 34px; border: 1px solid #e4dcc8; border-radius: 16px; background: #fbf8f1; box-shadow: 0 10px 28px rgba(43, 43, 38, .08); }
+      .file-launch-card span { display: block; color: #9a9487; font-size: 11px; font-weight: 700; letter-spacing: 2px; }
+      .file-launch-card h1 { margin: 10px 0 12px; color: #24382e; font: 700 28px/1.25 Georgia, "Songti SC", serif; }
+      .file-launch-card p { margin: 0 0 18px; color: #6e6a5e; line-height: 1.75; }
+      .file-launch-card pre { overflow-x: auto; margin: 0; padding: 14px 16px; border-radius: 10px; background: #24382e; color: #f4efe5; font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .file-launch-card small { display: block; margin-top: 16px; color: #9a9487; line-height: 1.6; }
+    </style>
   </head>
   <body>
     <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module">
+      const app = document.querySelector('#app');
+      if (window.location.protocol === 'file:') {
+        app.innerHTML = `
+          <main class="file-launch-help">
+            <section class="file-launch-card">
+              <span>VITA LOG · 启动说明</span>
+              <h1>这个页面需要通过本地服务打开</h1>
+              <p>浏览器不能从 <code>file://</code> 直接执行 TypeScript 模块。请在项目目录运行：</p>
+              <pre>npm install
+npm run dev</pre>
+              <small>终端会显示本地访问地址。生产环境请部署 <code>npm run build</code> 生成的静态资源。</small>
+            </section>
+          </main>`;
+      } else {
+        await import('/src/main.ts');
+      }
+    </script>
   </body>
 </html>

@@ -53,19 +53,20 @@
 
 ## 快速开始
 
-当前还是原型 HTML 阶段，直接用浏览器打开即可查看：
+独立版使用 TypeScript 和 Vite。浏览器不能通过 `file://` 直接执行 TypeScript 模块，请在项目目录启动本地服务：
 
 ```bash
-# 方式一：直接双击用浏览器打开
-open "轻盈计划减脂健身追踪台.html"
-
-# 方式二：本地起静态服务（推荐，避免 file:// 限制）
-npx serve .
-# 或
-python3 -m http.server 8080
+npm install
+npm run dev
 ```
 
-独立版（规划中）：任意静态托管即可部署（Cloudflare Pages / Vercel / NAS / 个人服务器），需 HTTPS 以保证浏览器存储与离线能力正常。
+生产构建：
+
+```bash
+npm run build
+```
+
+构建结果位于 `dist/`，可部署到任意静态托管（Cloudflare Pages / Vercel / NAS / 个人服务器）。生产环境建议使用 HTTPS，以保证浏览器存储与离线能力正常。直接双击源目录的 `index.html` 会显示启动说明，不会尝试加载 TypeScript。
 
 ## 数据与迁移
 
