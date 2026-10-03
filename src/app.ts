@@ -1,19 +1,30 @@
-import {
-  calculateBmi,
-  calculateWhr,
-  latestByDate,
-  type DietRecord,
-  type HealthSnapshot,
-  type WeightRecord,
-} from './domain';
+import { ClientEditorAuth, type EditorAuth } from './auth';
+import { calculateBmi, calculateWhr, latestByDate, type DietRecord, type HealthSnapshot, type WeightRecord } from './domain';
+import { deleteMeasurement, deleteWeight, saveBodyRecords, type BodyRecordTarget } from './record-editor';
 import { StorageError, type HealthDataRepository, type LoadStatus } from './storage';
 
 type StorageViewState = LoadStatus | 'saving' | 'saved' | 'error';
 
-export function mountApp(container: HTMLElement, repository: HealthDataRepository): void {
+interface BodyFormState {
+  target: BodyRecordTarget | null;
+  date: string;
+  weightKg: string;
+  bodyfatPercent: string;
+  waistCm: string;
+  hipCm: string;
+  note: string;
+  error: string;
+}
+
+const emptyForm = (): BodyFormState => ({ target: null, date: localDate(new Date()), weightKg: '', bodyfatPercent: '', waistCm: '', hipCm: '', note: '', error: '' });
+
+export function mountApp(container: HTMLElement, repository: HealthDataRepository, auth: EditorAuth = new ClientEditorAuth()): () => void {
   let snapshot: HealthSnapshot | null = null;
   let storageState: StorageViewState = 'saving';
   let storageMessage = '正在读取本地数据…';
+  let editing = auth.isUnlocked();
+  let authOpen = false;
+  let formState = emptyForm();
 
   const render = (): void => {
     if (!snapshot) {
@@ -21,8 +32,9 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       bindReload(container, load);
       return;
     }
-    container.innerHTML = renderDashboard(snapshot, storageState, storageMessage);
-    bindReload(container, load);
+    editing = auth.isUnlocked();
+    container.innerHTML = renderDashboard(snapshot, storageState, storageMessage, editing, formState, authOpen);
+    bindEvents();
   };
 
   const load = async (): Promise<void> => {
@@ -33,9 +45,8 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       const result = await repository.load();
       snapshot = result.snapshot;
       if (result.status === 'new') {
-        await repository.commit(snapshot);
         storageState = 'saved';
-        storageMessage = '已建立本地数据快照';
+        storageMessage = '本地存储已准备就绪';
       } else {
         storageState = 'loaded';
         storageMessage = '已从本地快照加载';
@@ -48,10 +59,114 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     render();
   };
 
+  const saveSnapshot = async (next: HealthSnapshot): Promise<boolean> => {
+    if (!auth.isUnlocked()) {
+      editing = false;
+      formState.error = '编辑会话已失效，请重新验证';
+      render();
+      return false;
+    }
+    try {
+      await repository.commit(next);
+      snapshot = next;
+      storageState = 'saved';
+      storageMessage = '已保存本地快照';
+      return true;
+    } catch (error) {
+      formState.error = error instanceof StorageError ? error.message : '本地数据保存失败';
+      storageState = 'error';
+      storageMessage = formState.error;
+      return false;
+    }
+  };
+
+  const submitBodyForm = async (event: SubmitEvent): Promise<void> => {
+    event.preventDefault();
+    if (!snapshot || !auth.isUnlocked()) { editing = false; render(); return; }
+    const form = event.currentTarget as HTMLFormElement;
+    const data = new FormData(form);
+    const numberOrUndefined = (key: string): number | undefined => {
+      const value = String(data.get(key) ?? '').trim();
+      return value === '' ? undefined : Number(value);
+    };
+    formState = {
+      ...formState,
+      date: String(data.get('date') ?? ''),
+      weightKg: String(data.get('weightKg') ?? ''),
+      bodyfatPercent: String(data.get('bodyfatPercent') ?? ''),
+      waistCm: String(data.get('waistCm') ?? ''),
+      hipCm: String(data.get('hipCm') ?? ''),
+      note: String(data.get('note') ?? ''),
+      error: '',
+    };
+    const result = saveBodyRecords(snapshot, {
+      date: String(data.get('date') ?? ''),
+      weightKg: numberOrUndefined('weightKg'),
+      bodyfatPercent: numberOrUndefined('bodyfatPercent'),
+      waistCm: numberOrUndefined('waistCm'),
+      hipCm: numberOrUndefined('hipCm'),
+      note: String(data.get('note') ?? ''),
+    }, formState.target, new Date().toISOString());
+    if (!result.ok) { formState.error = result.error; render(); return; }
+    if (formState.target && !window.confirm('确定保存对这条记录的修改吗？')) { render(); return; }
+    if (await saveSnapshot(result.snapshot)) formState = emptyForm();
+    render();
+  };
+
+  const handleRecordAction = async (action: string, id: string): Promise<void> => {
+    if (!snapshot || !auth.isUnlocked()) { editing = false; render(); return; }
+    if (action === 'edit-weight') {
+      const record = snapshot.weights.find((item) => item.id === id);
+      if (!record) return;
+      const measurement = snapshot.measurements.find((item) => item.date === record.date);
+      formState = { target: { kind: 'weight', weightId: record.id, measurementId: measurement?.id }, date: record.date, weightKg: String(record.weightKg), bodyfatPercent: record.bodyfatPercent == null ? '' : String(record.bodyfatPercent), waistCm: measurement ? String(measurement.waistCm) : '', hipCm: measurement ? String(measurement.hipCm) : '', note: record.note, error: '' };
+      render();
+      return;
+    }
+    if (action === 'edit-measurement') {
+      const record = snapshot.measurements.find((item) => item.id === id);
+      if (!record) return;
+      const weight = snapshot.weights.find((item) => item.date === record.date);
+      formState = { target: { kind: 'measurement', weightId: weight?.id, measurementId: record.id }, date: record.date, weightKg: weight ? String(weight.weightKg) : '', bodyfatPercent: weight?.bodyfatPercent == null ? '' : String(weight.bodyfatPercent), waistCm: String(record.waistCm), hipCm: String(record.hipCm), note: record.note, error: '' };
+      render();
+      return;
+    }
+    if (action === 'delete-weight' || action === 'delete-measurement') {
+      if (!window.confirm(action === 'delete-weight' ? '确定删除这条体重记录吗？' : '确定删除这条围度记录吗？')) return;
+      const next = action === 'delete-weight' ? deleteWeight(snapshot, id, new Date().toISOString()) : deleteMeasurement(snapshot, id, new Date().toISOString());
+      if (await saveSnapshot(next)) render();
+    }
+  };
+
+  const bindEvents = (): void => {
+    bindReload(container, load);
+    container.querySelectorAll<HTMLElement>('[data-action="auth-toggle"]').forEach((button) => button.addEventListener('click', () => {
+      if (auth.isUnlocked()) { auth.lock(); editing = false; formState = emptyForm(); render(); }
+      else { authOpen = true; render(); }
+    }));
+    container.querySelectorAll<HTMLElement>('[data-action="close-auth"]').forEach((button) => button.addEventListener('click', () => { authOpen = false; render(); }));
+    container.querySelectorAll<HTMLFormElement>('#authForm').forEach((form) => form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = new FormData(form);
+      const ok = await auth.unlock(String(data.get('username') ?? ''), String(data.get('password') ?? ''));
+      if (ok) { authOpen = false; editing = true; formState.error = ''; }
+      else formState.error = '账号或密码错误，未进入编辑模式';
+      render();
+    }));
+    container.querySelectorAll<HTMLFormElement>('#bodyRecordForm').forEach((form) => form.addEventListener('submit', (event) => { void submitBodyForm(event); }));
+    container.querySelectorAll<HTMLElement>('[data-action="reset-body-form"]').forEach((button) => button.addEventListener('click', () => { formState = emptyForm(); render(); }));
+    container.querySelectorAll<HTMLElement>('[data-action="edit-weight"], [data-action="edit-measurement"], [data-action="delete-weight"], [data-action="delete-measurement"]').forEach((button) => button.addEventListener('click', () => { void handleRecordAction(button.dataset.action ?? '', button.dataset.id ?? ''); }));
+  };
+
+  const expiryTimer = window.setInterval(() => {
+    if (editing && !auth.isUnlocked()) { editing = false; formState = emptyForm(); render(); }
+  }, 1_000);
+
   void load();
+  return () => window.clearInterval(expiryTimer);
 }
 
-function renderDashboard(snapshot: HealthSnapshot, state: StorageViewState, message: string): string {
+function renderDashboard(snapshot: HealthSnapshot, state: StorageViewState, message: string, editing: boolean, formState: BodyFormState, authOpen: boolean): string {
   const latestWeight = latestByDate(snapshot.weights);
   const latestMeasurement = latestByDate(snapshot.measurements);
   const bmi = latestWeight ? calculateBmi(latestWeight.weightKg, snapshot.settings.heightCm) : null;
@@ -61,41 +176,23 @@ function renderDashboard(snapshot: HealthSnapshot, state: StorageViewState, mess
   const todayDiet = snapshot.diets.filter((record) => record.date === today);
   const goalProgress = latestWeight ? progressPercent(latestWeight.weightKg, snapshot.settings.startWeightKg, snapshot.settings.targetWeightKg) : 0;
   const greeting = snapshot.settings.name ? `${snapshot.settings.name}，今天也稳稳向前。` : '今天也稳稳向前。';
+  return `<div class="app-shell"><header class="topbar"><div class="brand"><div class="brand-mark">轻</div><div><strong>轻盈计划</strong><span>个人健康记录</span></div></div><div class="top-actions"><span class="read-only-pill"><span class="status-dot"></span>${editing ? '本人编辑' : '只读 · 本地'}</span><button class="auth-button" data-action="auth-toggle" type="button">${editing ? '锁定' : '进入编辑'}</button><button class="icon-button" data-action="reload" aria-label="刷新本地数据" title="刷新本地数据">↻</button></div></header><main class="page"><section class="hero-card"><div><p class="eyebrow">DAILY CHECK-IN · ${escapeHtml(today)}</p><h1>${escapeHtml(greeting)}</h1><p class="hero-copy">把今天的记录留给自己，趋势会替你记住坚持。</p></div><div class="hero-ring" aria-label="目标进度 ${Math.round(goalProgress)}%"><span>${Math.round(goalProgress)}<small>%</small></span><em>目标进度</em></div></section><section class="section-block"><div class="section-heading"><div><p class="eyebrow">OVERVIEW · 概览</p><h2>今天的身体状态</h2></div><span class="saved-note ${state === 'error' ? 'error' : ''}">${escapeHtml(message)}</span></div><div class="metric-grid">${metricCard('当前体重', latestWeight ? `${formatNumber(latestWeight.weightKg)} <small>kg</small>` : '--', latestWeight ? latestWeight.date : '还没有记录', 'primary')}${metricCard('BMI', bmi ? formatNumber(bmi, 1) : '--', bmi ? bmiLabel(bmi) : '记录体重后显示', 'accent')}${metricCard('今日步数', todaySteps ? formatInteger(todaySteps.steps) : '--', todaySteps ? `${todaySteps.steps >= 8000 ? '已达标' : '目标 8000 步'}` : '还没有记录', 'blue')}${metricCard('今日饮食', todayDiet.length ? `${formatInteger(sum(todayDiet, 'calorie'))} <small>kcal</small>` : '--', todayDiet.length ? `${todayDiet.length} 条记录` : '还没有记录', 'amber')}</div></section>${renderEditor(snapshot, editing, formState)}<section class="two-column"><article class="card goal-card"><div class="card-heading"><div><p class="eyebrow">GOAL · 目标</p><h2>减脂进度</h2></div><span class="goal-number">${formatNumber(snapshot.settings.targetWeightKg)} <small>kg</small></span></div><div class="progress-track"><span style="width:${Math.min(100, Math.max(0, goalProgress))}%"></span></div><div class="goal-row"><span>起始体重 <b>${formatNumber(snapshot.settings.startWeightKg)} kg</b></span><span>目标体重 <b>${formatNumber(snapshot.settings.targetWeightKg)} kg</b></span></div><div class="detail-list"><div><span>最近围度</span><b>${latestMeasurement ? `${formatNumber(latestMeasurement.waistCm)} / ${formatNumber(latestMeasurement.hipCm)} cm` : '--'}</b></div><div><span>腰臀比 WHR</span><b>${whr ? formatNumber(whr, 2) : '--'}</b></div><div><span>目标体脂</span><b>${formatNumber(snapshot.settings.targetBodyfatPercent, 1)}%</b></div></div></article><article class="card today-card"><div class="card-heading"><div><p class="eyebrow">TODAY · 今日</p><h2>记录状态</h2></div><span class="status-label">${editing ? '本人编辑' : '只读预览'}</span></div>${renderTodayList(snapshot, today)}</article></section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">TREND · 趋势</p><h2>体重趋势</h2></div><span class="chart-meta">${snapshot.weights.length ? `共 ${snapshot.weights.length} 条` : '等待第一条记录'}</span></div>${renderWeightChart(snapshot.weights)}</section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">MEASURE · 围度</p><h2>腰围与臀围趋势</h2></div><span class="chart-meta">${snapshot.measurements.length ? `共 ${snapshot.measurements.length} 条` : '等待第一条记录'}</span></div>${renderMeasurementChart(snapshot.measurements)}</section><section class="card calendar-card"><div class="card-heading"><div><p class="eyebrow">CALENDAR · 日历</p><h2>最近 7 天</h2></div><span class="chart-meta">体重 · 步数 · 饮食</span></div>${renderCalendar(snapshot, today)}</section><section class="two-column lower-grid"><article class="card"><div class="card-heading"><div><p class="eyebrow">PROFILE · 设置</p><h2>当前计划</h2></div></div><div class="profile-grid"><div><span>身高</span><b>${formatNumber(snapshot.settings.heightCm)} cm</b></div><div><span>年龄</span><b>${snapshot.settings.age} 岁</b></div><div><span>热量目标</span><b>${formatInteger(snapshot.settings.calorieTarget)} kcal</b></div><div><span>蛋白质目标</span><b>${formatInteger(snapshot.settings.proteinTarget)} g</b></div></div><p class="muted">${editing ? '编辑会话已开启，保存后数据写入当前浏览器。' : '进入本人编辑模式后可以维护记录。'}</p></article><article class="card backup-card"><div class="card-heading"><div><p class="eyebrow">STORAGE · 存储</p><h2>本地数据</h2></div><span class="status-check">✓</span></div><p>当前页面使用浏览器本地快照。第一版不会向腾讯云文档或 Workbuddy 发起请求。</p><div class="data-count">${snapshot.weights.length + snapshot.measurements.length + snapshot.steps.length + snapshot.checkins.length + snapshot.diets.length}<small> 条记录</small></div><p class="muted">请定期导出完整备份，避免浏览器数据成为唯一副本。</p></article></section></main><footer class="footer">轻盈计划 · 独立静态版 <span>数据只保存在当前浏览器</span></footer>${authOpen ? renderAuthModal(formState.error) : ''}</div>`;
+}
 
-  return `
-    <div class="app-shell">
-      <header class="topbar">
-        <div class="brand"><div class="brand-mark">轻</div><div><strong>轻盈计划</strong><span>个人健康记录</span></div></div>
-        <div class="top-actions"><span class="read-only-pill"><span class="status-dot"></span>只读 · 本地</span><button class="icon-button" data-action="reload" aria-label="刷新本地数据" title="刷新本地数据">↻</button></div>
-      </header>
-      <main class="page">
-        <section class="hero-card">
-          <div><p class="eyebrow">DAILY CHECK-IN · ${escapeHtml(today)}</p><h1>${escapeHtml(greeting)}</h1><p class="hero-copy">把今天的记录留给自己，趋势会替你记住坚持。</p></div>
-          <div class="hero-ring" aria-label="目标进度 ${Math.round(goalProgress)}%"><span>${Math.round(goalProgress)}<small>%</small></span><em>目标进度</em></div>
-        </section>
+function renderEditor(snapshot: HealthSnapshot, editing: boolean, form: BodyFormState): string {
+  const locked = `<article class="card editor-card locked-editor"><div><p class="eyebrow">RECORD · 记录</p><h2>体重与围度</h2><p class="muted">当前为只读模式。验证本人身份后可以新增、修改和删除体重、体脂、腰围和臀围。</p></div><button class="primary-button" data-action="auth-toggle" type="button">进入编辑模式</button></article>`;
+  const formTitle = form.target ? '编辑身体记录' : '新增身体记录';
+  const weights = [...snapshot.weights].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
+  const measurements = [...snapshot.measurements].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
+  return `<section class="editor-section"><div class="section-heading"><div><p class="eyebrow">RECORD · 记录</p><h2>体重与围度</h2></div><span class="saved-note">${form.target ? '正在编辑记录' : '体重、体脂、腰围和臀围'}</span></div>${editing ? `<article class="card editor-card"><div class="card-heading"><div><p class="eyebrow">${form.target ? 'EDIT · 编辑' : 'ADD · 新增'}</p><h2>${formTitle}</h2></div>${form.target ? '<button class="text-button" data-action="reset-body-form" type="button">取消编辑</button>' : ''}</div><form id="bodyRecordForm" class="body-record-form"><label>日期<input name="date" type="date" required value="${escapeHtml(form.date)}"></label><label>体重（kg）<input name="weightKg" type="number" min="20" max="400" step="0.1" placeholder="如 77.2" value="${escapeHtml(form.weightKg)}"></label><label>体脂率（%）<input name="bodyfatPercent" type="number" min="3" max="70" step="0.1" placeholder="选填" value="${escapeHtml(form.bodyfatPercent)}"></label><label>腰围（cm）<input name="waistCm" type="number" min="40" max="250" step="0.1" placeholder="选填" value="${escapeHtml(form.waistCm)}"></label><label>臀围（cm）<input name="hipCm" type="number" min="40" max="300" step="0.1" placeholder="选填" value="${escapeHtml(form.hipCm)}"></label><label class="wide-field">备注<input name="note" maxlength="80" placeholder="如 晨起空腹" value="${escapeHtml(form.note)}"></label><div class="form-actions wide-field"><button class="primary-button" type="submit">${form.target ? '保存修改' : '保存记录'}</button>${form.error ? `<span class="form-error" role="alert">${escapeHtml(form.error)}</span>` : ''}</div></form></article>${renderHistory(weights, measurements)}` : locked}</section>`;
+}
 
-        <section class="section-block"><div class="section-heading"><div><p class="eyebrow">OVERVIEW · 概览</p><h2>今天的身体状态</h2></div><span class="saved-note ${state === 'error' ? 'error' : ''}">${escapeHtml(message)}</span></div>
-          <div class="metric-grid">
-            ${metricCard('当前体重', latestWeight ? `${formatNumber(latestWeight.weightKg)} <small>kg</small>` : '--', latestWeight ? latestWeight.date : '还没有记录', 'primary')}
-            ${metricCard('BMI', bmi ? formatNumber(bmi, 1) : '--', bmi ? bmiLabel(bmi) : '记录体重后显示', 'accent')}
-            ${metricCard('今日步数', todaySteps ? formatInteger(todaySteps.steps) : '--', todaySteps ? `${todaySteps.steps >= 8000 ? '已达标' : '目标 8000 步'}` : '还没有记录', 'blue')}
-            ${metricCard('今日饮食', todayDiet.length ? `${formatInteger(sum(todayDiet, 'calorie'))} <small>kcal</small>` : '--', todayDiet.length ? `${todayDiet.length} 条记录` : '还没有记录', 'amber')}
-          </div>
-        </section>
+function renderHistory(weights: WeightRecord[], measurements: HealthSnapshot['measurements']): string {
+  return `<article class="card history-card"><div class="history-columns"><div><h3>最近体重</h3>${weights.length ? weights.map((record) => `<div class="history-row"><div><b>${record.date}</b><span>${formatNumber(record.weightKg)} kg${record.bodyfatPercent == null ? '' : ` · 体脂 ${formatNumber(record.bodyfatPercent)}%`}</span></div><div class="row-actions"><button class="text-button" data-action="edit-weight" data-id="${escapeHtml(record.id)}" type="button">编辑</button><button class="text-button danger-text" data-action="delete-weight" data-id="${escapeHtml(record.id)}" type="button">删除</button></div></div>`).join('') : '<p class="muted">还没有体重记录。</p>'}</div><div><h3>最近围度</h3>${measurements.length ? measurements.map((record) => `<div class="history-row"><div><b>${record.date}</b><span>腰 ${formatNumber(record.waistCm)} / 臀 ${formatNumber(record.hipCm)} cm · WHR ${formatNumber(calculateWhr(record.waistCm, record.hipCm) ?? 0, 2)}</span></div><div class="row-actions"><button class="text-button" data-action="edit-measurement" data-id="${escapeHtml(record.id)}" type="button">编辑</button><button class="text-button danger-text" data-action="delete-measurement" data-id="${escapeHtml(record.id)}" type="button">删除</button></div></div>`).join('') : '<p class="muted">还没有围度记录。</p>'}</div></div></article>`;
+}
 
-        <section class="two-column">
-          <article class="card goal-card"><div class="card-heading"><div><p class="eyebrow">GOAL · 目标</p><h2>减脂进度</h2></div><span class="goal-number">${formatNumber(snapshot.settings.targetWeightKg)} <small>kg</small></span></div><div class="progress-track"><span style="width:${Math.min(100, Math.max(0, goalProgress))}%"></span></div><div class="goal-row"><span>起始体重 <b>${formatNumber(snapshot.settings.startWeightKg)} kg</b></span><span>目标体重 <b>${formatNumber(snapshot.settings.targetWeightKg)} kg</b></span></div><div class="detail-list"><div><span>最近围度</span><b>${latestMeasurement ? `${formatNumber(latestMeasurement.waistCm)} / ${formatNumber(latestMeasurement.hipCm)} cm` : '--'}</b></div><div><span>腰臀比 WHR</span><b>${whr ? formatNumber(whr, 2) : '--'}</b></div><div><span>目标体脂</span><b>${formatNumber(snapshot.settings.targetBodyfatPercent, 1)}%</b></div></div></article>
-          <article class="card today-card"><div class="card-heading"><div><p class="eyebrow">TODAY · 今日</p><h2>记录状态</h2></div><span class="status-label">只读预览</span></div>${renderTodayList(snapshot, today)}</article>
-        </section>
-
-        <section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">TREND · 趋势</p><h2>体重趋势</h2></div><span class="chart-meta">${snapshot.weights.length ? `共 ${snapshot.weights.length} 条` : '等待第一条记录'}</span></div>${renderWeightChart(snapshot.weights)}</section>
-
-        <section class="card calendar-card"><div class="card-heading"><div><p class="eyebrow">CALENDAR · 日历</p><h2>最近 7 天</h2></div><span class="chart-meta">体重 · 步数 · 饮食</span></div>${renderCalendar(snapshot, today)}</section>
-
-        <section class="two-column lower-grid"><article class="card"><div class="card-heading"><div><p class="eyebrow">PROFILE · 设置</p><h2>当前计划</h2></div></div><div class="profile-grid"><div><span>身高</span><b>${formatNumber(snapshot.settings.heightCm)} cm</b></div><div><span>年龄</span><b>${snapshot.settings.age} 岁</b></div><div><span>热量目标</span><b>${formatInteger(snapshot.settings.calorieTarget)} kcal</b></div><div><span>蛋白质目标</span><b>${formatInteger(snapshot.settings.proteinTarget)} g</b></div></div><p class="muted">编辑功能将在本人模式中提供。</p></article><article class="card backup-card"><div class="card-heading"><div><p class="eyebrow">STORAGE · 存储</p><h2>本地数据</h2></div><span class="status-check">✓</span></div><p>当前页面使用浏览器本地快照。第一版不会向腾讯云文档或 Workbuddy 发起请求。</p><div class="data-count">${snapshot.weights.length + snapshot.measurements.length + snapshot.steps.length + snapshot.checkins.length + snapshot.diets.length}<small> 条记录</small></div><p class="muted">请定期导出完整备份，避免浏览器数据成为唯一副本。</p></article></section>
-      </main>
-      <footer class="footer">轻盈计划 · 独立静态版 <span>数据只保存在当前浏览器</span></footer>
-    </div>`;
+function renderAuthModal(error: string): string {
+  return `<div class="auth-modal" role="dialog" aria-modal="true"><form class="auth-dialog" id="authForm"><div class="card-heading"><div><p class="eyebrow">OWNER ACCESS · 本人验证</p><h2>进入编辑模式</h2></div><button class="text-button" data-action="close-auth" type="button">关闭</button></div><p class="muted">验证只在当前浏览器会话内生效，用于防止分享或共用设备时误修改数据。</p><label>账号<input name="username" type="text" autocomplete="username" required></label><label>密码<input name="password" type="password" autocomplete="current-password" required></label>${error ? `<p class="form-error" role="alert">${escapeHtml(error)}</p>` : ''}<button class="primary-button" type="submit">验证并进入</button></form></div>`;
 }
 
 function renderTodayList(snapshot: HealthSnapshot, today: string): string {
@@ -125,6 +222,22 @@ function renderWeightChart(records: WeightRecord[]): string {
   return `<div class="chart-wrap"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="体重趋势折线图"><line class="grid-line" x1="26" y1="42" x2="654" y2="42" /><line class="grid-line" x1="26" y1="104" x2="654" y2="104" /><line class="grid-line" x1="26" y1="166" x2="654" y2="166" /><path class="trend-line" d="${path}" /><g class="trend-points">${circles}</g><g>${labels}</g></svg></div>`;
 }
 
+function renderMeasurementChart(records: HealthSnapshot['measurements']): string {
+  const sorted = [...records].sort((a, b) => a.date.localeCompare(b.date)).slice(-12);
+  if (sorted.length < 2) return `<div class="empty-chart"><span>⌁</span><p>记录至少 2 条围度数据后，这里会出现趋势曲线。</p></div>`;
+  const values = sorted.flatMap((record) => [record.waistCm, record.hipCm]);
+  const min = Math.min(...values) - 1;
+  const max = Math.max(...values) + 1;
+  const width = 680;
+  const height = 210;
+  const pointsFor = (key: 'waistCm' | 'hipCm') => sorted.map((record, index) => ({ x: 26 + (index * (width - 52)) / (sorted.length - 1), y: height - 26 - ((record[key] - min) / (max - min)) * (height - 52) }));
+  const waist = pointsFor('waistCm');
+  const hip = pointsFor('hipCm');
+  const path = (points: Array<{ x: number; y: number }>) => points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' ');
+  const labels = sorted.map((record, index) => `<text class="axis-label" x="${waist[index].x}" y="200" text-anchor="middle">${record.date.slice(5)}</text>`).join('');
+  return `<div class="chart-wrap"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="腰围与臀围趋势折线图"><line class="grid-line" x1="26" y1="42" x2="654" y2="42" /><line class="grid-line" x1="26" y1="104" x2="654" y2="104" /><line class="grid-line" x1="26" y1="166" x2="654" y2="166" /><path class="trend-line measure-waist" d="${path(waist)}" /><path class="trend-line measure-hip" d="${path(hip)}" /><g>${labels}</g></svg></div><div class="legend"><span><i class="on"></i>腰围（cm）</span><span><i class="on amber"></i>臀围（cm）</span></div>`;
+}
+
 function renderCalendar(snapshot: HealthSnapshot, today: string): string {
   const dates = Array.from({ length: 7 }, (_, index) => {
     const date = new Date(`${today}T12:00:00`);
@@ -150,9 +263,7 @@ function renderLoading(): string {
 }
 
 function bindReload(container: HTMLElement, load: () => Promise<void>): void {
-  container.querySelectorAll<HTMLElement>('[data-action="reload"]').forEach((button) => {
-    button.addEventListener('click', () => { void load(); });
-  });
+  container.querySelectorAll<HTMLElement>('[data-action="reload"]').forEach((button) => button.addEventListener('click', () => { void load(); }));
 }
 
 function metricCard(label: string, value: string, note: string, tone: string): string {

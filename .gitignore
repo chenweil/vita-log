@@ -17,6 +17,7 @@ dist/
 exports/
 backups/
 data/
+docs/import/
 *.csv
 !docs/**/*.csv
 
