@@ -155,6 +155,19 @@ h2 { margin: 3px 0 0; color: var(--primary-deep); font: 700 22px Georgia, "Songt
 .diet-history-row { min-height: 58px; }
 .calendar-diet-list { display: grid; gap: 5px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-soft); color: var(--ink-2); font-size: 12px; }
 .calendar-diet-list strong { color: var(--primary-deep); font-size: 13px; }
+.data-manager-card { display: grid; gap: 15px; }
+.transfer-actions { display: flex; flex-wrap: wrap; gap: 8px 15px; }
+.import-controls { display: flex; align-items: end; gap: 12px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+.import-controls label { display: grid; gap: 6px; color: var(--ink-2); font-size: 12px; }
+.import-controls select { height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: #fffdf8; font: inherit; }
+.file-button { padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--primary); background: #fffdf8; cursor: pointer; }
+.file-button input { display: none; }
+.recovery-row { display: flex; justify-content: space-between; gap: 12px; padding-top: 12px; border-top: 1px solid var(--line-soft); color: var(--ink-3); font-size: 12px; }
+.transfer-preview { display: grid; gap: 10px; padding: 13px; border: 1px solid var(--line); border-radius: 9px; background: #f4efe5; }
+.transfer-preview > div:first-child { display: flex; justify-content: space-between; gap: 12px; color: var(--primary-deep); font-size: 13px; }
+.transfer-preview > div:first-child span { color: var(--ink-2); font-size: 12px; }
+.transfer-errors { margin: 0; padding-left: 20px; color: #a13e2c; font-size: 12px; line-height: 1.7; }
+.transfer-preview-actions { display: flex; justify-content: flex-end; gap: 12px; }
 .checkin-group + .checkin-group { margin-top: 22px; }
 .checkin-button { display: flex; align-items: center; gap: 8px; width: 100%; margin: 6px 0; padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: 8px; color: var(--ink-2); background: #fffdf8; text-align: left; cursor: pointer; font-size: 13px; }
 .checkin-button:hover { border-color: var(--primary); }
@@ -223,4 +236,6 @@ h2 { margin: 3px 0 0; color: var(--primary-deep); font: 700 22px Georgia, "Songt
   .wide-field { grid-column: auto; }
   .calendar-detail-head { align-items: flex-start; flex-direction: column; gap: 4px; }
   .calendar-checkins { grid-template-columns: 1fr; }
+  .import-controls { align-items: stretch; flex-direction: column; }
+  .recovery-row { align-items: flex-start; flex-direction: column; }
 }

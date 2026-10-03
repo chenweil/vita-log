@@ -1,6 +1,7 @@
 import { ClientEditorAuth, type EditorAuth } from './auth';
 import { deleteStep, saveStep, toggleCheckin } from './activity-editor';
 import { deleteDiet, saveDiet } from './diet-editor';
+import { exportCsv, exportJson, importCsvPreview, importJsonPreview, type CsvKind, type TransferPreview } from './data-transfer';
 import { calculateBmi, calculateWhr, latestByDate, type DietRecord, type HealthSnapshot, type WeightRecord } from './domain';
 import { deleteMeasurement, deleteWeight, saveBodyRecords, type BodyRecordTarget } from './record-editor';
 import { StorageError, type HealthDataRepository, type LoadStatus } from './storage';
@@ -40,7 +41,7 @@ interface DietFormState {
   error: string;
 }
 
-type SaveErrorTarget = 'body' | 'step' | 'diet';
+type SaveErrorTarget = 'body' | 'step' | 'diet' | 'transfer';
 
 const emptyForm = (): BodyFormState => ({ target: null, date: localDate(new Date()), weightKg: '', bodyfatPercent: '', waistCm: '', hipCm: '', note: '', error: '' });
 const emptyStepForm = (): StepFormState => ({ targetId: null, date: localDate(new Date()), steps: '', note: '', error: '' });
@@ -56,6 +57,11 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
   let stepForm = emptyStepForm();
   let dietForm = emptyDietForm();
   let selectedDate = localDate(new Date());
+  let recoveryAvailable = false;
+  let persistedSnapshot = false;
+  let transferKind: CsvKind = 'weight';
+  let transferPreview: TransferPreview | null = null;
+  let transferMessage = '';
 
   const render = (): void => {
     if (!snapshot) {
@@ -66,6 +72,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     editing = auth.isUnlocked();
     container.innerHTML = renderDashboard(snapshot, storageState, storageMessage, editing, formState, stepForm, dietForm, selectedDate, authOpen);
     bindEvents();
+    bindDataManager();
   };
 
   const load = async (): Promise<void> => {
@@ -75,6 +82,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     try {
       const result = await repository.load();
       snapshot = result.snapshot;
+      persistedSnapshot = result.status === 'loaded';
       if (result.status === 'new') {
         storageState = 'saved';
         storageMessage = '本地存储已准备就绪';
@@ -82,6 +90,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
         storageState = 'loaded';
         storageMessage = '已从本地快照加载';
       }
+      void repository.loadRecovery().then(() => { recoveryAvailable = true; if (snapshot) render(); }).catch(() => { recoveryAvailable = false; });
     } catch (error) {
       snapshot = null;
       storageState = 'error';
@@ -100,6 +109,8 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     try {
       await repository.commit(next);
       snapshot = next;
+      recoveryAvailable = recoveryAvailable || persistedSnapshot;
+      persistedSnapshot = true;
       storageState = 'saved';
       storageMessage = '已保存本地快照';
       return true;
@@ -115,6 +126,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
   const setSaveError = (target: SaveErrorTarget, message: string): void => {
     if (target === 'step') stepForm.error = message;
     else if (target === 'diet') dietForm.error = message;
+    else if (target === 'transfer') transferMessage = message;
     else formState.error = message;
   };
 
@@ -242,6 +254,59 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       if (!window.confirm('确定删除这条饮食记录吗？')) return;
       if (await saveSnapshot(deleteDiet(snapshot, id, new Date().toISOString()), 'diet')) render();
     }
+  };
+
+  const renderDataManager = (): void => {
+    const main = container.querySelector('main.page');
+    if (!main || main.querySelector('.data-manager-section')) return;
+    main.insertAdjacentHTML('beforeend', `<section class="editor-section data-manager-section"><div class="section-heading"><div><p class="eyebrow">DATA · 数据</p><h2>备份与导入</h2></div><span class="saved-note">JSON 完整备份 · CSV 分类交换</span></div><article class="card data-manager-card"><div class="transfer-actions"><button class="text-button" data-action="export-json" type="button">导出完整 JSON</button><button class="text-button" data-action="export-csv" data-kind="weight" type="button">导出体重 CSV</button><button class="text-button" data-action="export-csv" data-kind="measurement" type="button">导出围度 CSV</button><button class="text-button" data-action="export-csv" data-kind="checkin" type="button">导出打卡 CSV</button><button class="text-button" data-action="export-csv" data-kind="step" type="button">导出步数 CSV</button><button class="text-button" data-action="export-csv" data-kind="diet" type="button">导出饮食 CSV</button></div>${editing ? `<div class="import-controls"><label>导入类型<select id="transferKind"><option value="weight" ${transferKind === 'weight' ? 'selected' : ''}>体重</option><option value="measurement" ${transferKind === 'measurement' ? 'selected' : ''}>围度</option><option value="checkin" ${transferKind === 'checkin' ? 'selected' : ''}>打卡</option><option value="step" ${transferKind === 'step' ? 'selected' : ''}>步数</option><option value="diet" ${transferKind === 'diet' ? 'selected' : ''}>饮食</option></select></label><label class="file-button">选择 JSON/CSV<input id="transferFile" type="file" accept=".json,.csv,application/json,text/csv"></label></div><button class="text-button danger-text" data-action="clear-all" type="button">清空全部记录</button>` : '<p class="muted">进入本人编辑模式后可以导入备份或历史 CSV。</p>'}${transferMessage ? `<p class="form-error" role="alert">${escapeHtml(transferMessage)}</p>` : ''}${transferPreview ? renderTransferPreview(transferPreview) : ''}<div class="recovery-row"><span>${recoveryAvailable ? '已有可恢复快照' : '暂无恢复快照'}</span>${editing ? `<button class="text-button" data-action="restore-recovery" type="button" ${recoveryAvailable ? '' : 'disabled'}>恢复上一次快照</button>` : ''}</div></article></section>`);
+  };
+
+  const bindDataManager = (): void => {
+    renderDataManager();
+    container.querySelectorAll<HTMLElement>('[data-action="export-json"]').forEach((button) => button.addEventListener('click', () => downloadText('vita-log-backup.json', exportJson(snapshot!), 'application/json')));
+    container.querySelectorAll<HTMLElement>('[data-action="export-csv"]').forEach((button) => button.addEventListener('click', () => downloadText(`vita-log-${button.dataset.kind}.csv`, exportCsv(snapshot!, button.dataset.kind as CsvKind), 'text/csv;charset=utf-8')));
+    container.querySelectorAll<HTMLSelectElement>('#transferKind').forEach((select) => select.addEventListener('change', () => { transferKind = select.value as CsvKind; }));
+    container.querySelectorAll<HTMLInputElement>('#transferFile').forEach((input) => input.addEventListener('change', () => { const file = input.files?.[0]; if (file) void previewTransferFile(file); }));
+    container.querySelectorAll<HTMLElement>('[data-action="cancel-transfer"]').forEach((button) => button.addEventListener('click', () => { transferPreview = null; transferMessage = ''; render(); }));
+    container.querySelectorAll<HTMLElement>('[data-action="commit-transfer"]').forEach((button) => button.addEventListener('click', () => { void commitTransfer(); }));
+    container.querySelectorAll<HTMLElement>('[data-action="restore-recovery"]').forEach((button) => button.addEventListener('click', () => { void restoreRecovery(); }));
+    container.querySelectorAll<HTMLElement>('[data-action="clear-all"]').forEach((button) => button.addEventListener('click', () => { void clearAllRecords(); }));
+  };
+
+  const previewTransferFile = async (file: File): Promise<void> => {
+    if (!snapshot || !auth.isUnlocked()) { editing = false; render(); return; }
+    transferMessage = '';
+    try {
+      const text = await file.text();
+      transferPreview = file.name.toLowerCase().endsWith('.json') ? importJsonPreview(text, snapshot) : importCsvPreview(snapshot, transferKind, text, new Date().toISOString());
+    } catch { transferMessage = '读取导入文件失败'; }
+    render();
+  };
+
+  const commitTransfer = async (): Promise<void> => {
+    if (!snapshot || !transferPreview?.snapshot || !transferPreview.valid || !auth.isUnlocked()) { transferMessage = '请先完成校验并进入编辑模式'; render(); return; }
+    if (!window.confirm('导入确认：当前数据会在恢复点中保留，确认写入导入结果吗？')) return;
+    if (await saveSnapshot(transferPreview.snapshot, 'transfer')) { transferMessage = `导入完成：${transferPreview.accepted} 条记录`; transferPreview = null; }
+    render();
+  };
+
+  const restoreRecovery = async (): Promise<void> => {
+    if (!auth.isUnlocked()) { editing = false; render(); return; }
+    if (!window.confirm('确定恢复上一次本地快照吗？当前数据会先保存在新的恢复点中。')) return;
+    try {
+      const recovered = await repository.loadRecovery();
+      if (await saveSnapshot(recovered, 'transfer')) { transferMessage = '已恢复上一次本地快照'; }
+    } catch (error) { transferMessage = error instanceof StorageError ? error.message : '恢复快照失败'; }
+    render();
+  };
+
+  const clearAllRecords = async (): Promise<void> => {
+    if (!snapshot || !auth.isUnlocked()) { editing = false; render(); return; }
+    if (!window.confirm('确定清空全部体重、围度、步数、打卡和饮食记录吗？当前数据会先保存到恢复点。')) return;
+    const next: HealthSnapshot = { ...snapshot, updatedAt: new Date().toISOString(), weights: [], measurements: [], steps: [], checkins: [], diets: [] };
+    if (await saveSnapshot(next, 'transfer')) transferMessage = '已清空全部记录，可从恢复点还原';
+    render();
   };
 
   const bindEvents = (): void => {
@@ -482,4 +547,20 @@ function localDate(date: Date): string {
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character] ?? character);
+}
+
+function renderTransferPreview(preview: TransferPreview): string {
+  const messages = [...preview.errors, ...preview.details];
+  return `<div class="transfer-preview"><div><b>导入预览</b><span>接受 ${preview.accepted} 条 · 重复 ${preview.duplicates} 条 · 冲突 ${preview.conflicts} 条</span></div>${messages.length ? `<ul class="transfer-errors">${messages.slice(0, 8).map((error) => `<li>${escapeHtml(error)}</li>`).join('')}</ul>` : '<p class="muted">校验通过。冲突记录默认保留当前数据。</p>'}<div class="transfer-preview-actions"><button class="text-button" data-action="cancel-transfer" type="button">取消</button><button class="primary-button" data-action="commit-transfer" type="button" ${preview.valid && preview.snapshot ? '' : 'disabled'}>确认导入</button></div></div>`;
+}
+
+function downloadText(name: string, content: string, mime: string): void {
+  const blob = new Blob([content], { type: mime });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
 }
