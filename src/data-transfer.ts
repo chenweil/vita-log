@@ -96,7 +96,7 @@ function parseCsvRecord(kind: CsvKind, row: string[], line: number, now: string)
     if (!type || !value(2)) return { error: `第 ${line} 行打卡类型或项目无效` };
     return { record: { id: createId('c'), date, type, item: value(2), done: ['是', 'true', '1', '完成'].includes(value(3).toLowerCase()), note: value(4), createdAt: now, updatedAt: now } };
   }
-  const values = [1, 5, 6, 7, 8].map((index) => numeric(index, CSV_HEADERS.diet[index - 1]));
+  const values = [3, 4, 5, 6, 7].map((index) => numeric(index, CSV_HEADERS.diet[index]));
   if (values.some((value) => typeof value === 'string' || Number(value) < 0)) return { error: `第 ${line} 行营养数值无效` };
   if (!value(2)) return { error: `第 ${line} 行食物为空` };
   return { record: { id: createId('d'), date, meal: value(1), food: value(2), calorie: Number(values[0]), protein: Number(values[1]), fat: Number(values[2]), carb: Number(values[3]), sodium: Number(values[4]), note: value(9), createdAt: now, updatedAt: now } };
