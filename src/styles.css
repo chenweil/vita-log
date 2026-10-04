@@ -248,3 +248,13 @@ h2 { margin: 3px 0 0; color: var(--primary-deep); font: 700 22px Georgia, "Songt
 .prompt-actions { display:flex; align-items:center; gap:10px; }
 .prompt-help { width:24px; height:24px; border:1px solid var(--line); border-radius:50%; background:var(--card); color:var(--primary); font-weight:700; cursor:pointer; }
 .legacy-diet-fields { display:none; }
+.settings-form { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:12px; }
+.settings-form label { display:grid; gap:5px; color:var(--ink-2); font-size:13px; }
+.settings-form input, .settings-form select { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:var(--card); font:inherit; }
+.settings-form .wide-field { grid-column:1/-1; }
+@media (max-width:600px) { .settings-form { grid-template-columns:1fr; } }
+.settings-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+.settings-form label { display:grid; gap:5px; color:var(--ink-2); font-size:13px; }
+.settings-form input, .settings-form select { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:var(--card); font:inherit; }
+.settings-form .wide-field { grid-column:1/-1; }
+@media (max-width:600px) { .settings-form { grid-template-columns:1fr; } }
