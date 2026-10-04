@@ -61,4 +61,4 @@
 
 ### 2026-10-05 — Closed after implementation verification
 
-实现了 Node 22 内置 SQLite 快照仓库、`127.0.0.1` API 服务、版本冲突保护、scrypt 会话认证、浏览器快照显式迁移、手动/每日/恢复前备份、恢复和命令行备份恢复入口。验证证据：`npm run typecheck`、`npm test`（13 个测试文件、50 项测试）、`npm run build`、`npm run verify:release`，以及隔离 HTTP smoke（health、setup、snapshot PUT、stale version 409、backup）。
+实现了 Node 22 内置 SQLite 快照仓库、`127.0.0.1` API 服务、版本冲突保护、scrypt 会话认证、浏览器快照显式迁移、手动/每日/恢复前备份、恢复和命令行备份恢复入口。验证证据：`npm run typecheck`、`npm test`（13 个测试文件、50 项测试）、`npm run build`、`npm run verify:release`；隔离 HTTP smoke 覆盖 health、setup、snapshot PUT 和 backup，`tests/sqlite-api.test.ts` 覆盖过期版本 409。
