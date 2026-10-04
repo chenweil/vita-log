@@ -26,12 +26,12 @@
         ↓
 统一数据访问接口（健康数据仓库）
         ↓
-本地存储适配器 / SQLite 适配器 / 云端适配器（未来）
+本地存储适配器 / SQLite 自托管适配器 / 云端适配器（未来）
 ```
 
 - 第一版：独立静态单页 + 浏览器本地存储 + CSV/JSON 导入导出
 - 腾讯云文档只做一次性历史数据导入来源，不接 API、不做持续同步
-- SQLite / Supabase / Cloudflare D1 作为未来可选适配器，不锁死
+- SQLite 自托管适配器已提供；Supabase / Cloudflare D1 仍作为未来云端适配器，不锁死
 
 详见：
 
@@ -100,7 +100,7 @@ npm run verify:release
 - [ ] 本人编辑 / 只读发布
 - [ ] 腾讯云文档历史数据一次性迁移验证 + 新 JSON 备份
 - [ ] 下线旧 Workbuddy 页面
-- 未来：SQLite / 云端适配器、多端同步、自动发布
+- SQLite 自托管模式已提供本机 Node.js 服务和版本化快照仓库，见 [`docs/sqlite-self-hosted.md`](docs/sqlite-self-hosted.md)。云端适配器、多端同步、自动发布仍待后续设计。
 
 ## 隐私
 

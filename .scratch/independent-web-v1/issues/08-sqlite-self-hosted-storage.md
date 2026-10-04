@@ -4,20 +4,20 @@
 
 **Blocked by:** 01–05：独立静态页面、本人编辑、活动记录、饮食记录、备份与导入能力
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 明确 SQLite 文件、备份文件和服务器持久化数据卷的位置。
-- [ ] 定义 Node.js API 的读取、写入、备份和恢复契约。
-- [ ] 让现有 TypeScript 前端通过同一健康数据仓库契约选择 SQLite 适配器。
-- [ ] 支持将当前 `localStorage` 快照一次性迁移到 SQLite。
-- [ ] 保留 JSON/CSV 导出作为人工备份和恢复路径。
-- [ ] 明确本人编辑认证、只读访问和后端授权规则。
-- [ ] 定义 SQLite 文件备份、恢复和写入失败时的恢复证据。
-- [ ] 不在本票据中实现 Supabase；SQLite 适配器稳定后再单独设计 Supabase 适配器。
+- [x] 明确 SQLite 文件、备份文件和服务器持久化数据卷的位置。
+- [x] 定义 Node.js API 的读取、写入、备份和恢复契约。
+- [x] 让现有 TypeScript 前端通过同一健康数据仓库契约选择 SQLite 适配器。
+- [x] 支持将当前 `localStorage` 快照一次性迁移到 SQLite。
+- [x] 保留 JSON/CSV 导出作为人工备份和恢复路径。
+- [x] 明确本人编辑认证、只读访问和后端授权规则。
+- [x] 定义 SQLite 文件备份、恢复和写入失败时的恢复证据。
+- [x] 不在本票据中实现 Supabase；SQLite 适配器稳定后再单独设计 Supabase 适配器。
 
 ## Notes
 
-当前阶段继续完善静态页面和本地数据交互。SQLite 不是本阶段的实现内容，而是下一阶段的持久化边界决策。
+历史背景：SQLite 曾作为静态页面稳定后的下一阶段持久化边界；当前实现已按下方决议完成。
 
 ## Decisions — 2026-10-04
 
@@ -31,7 +31,7 @@
 - 保留上一份恢复快照；提供手动备份；每日首次写入前自动备份，备份失败停止该次写入并提示。
 - 写入带数据版本，拒绝过期版本覆盖；提示重新加载，保留未保存输入，不自动合并。
 
-设计已确定，实现尚未开始；实现阶段仍需按本票据逐项验证。
+设计已确定；实现已按下方关闭记录完成并经过本地契约、API 和 HTTP smoke 验证。
 
 - 自动备份保留最近 30 份每日备份；新备份成功后才清理旧备份，手动备份不自动删除。
 - 恢复先展示备份时间、记录数量和设置概况；确认后完整替换当前数据。恢复前再保存当前数据，校验或备份失败则保持原数据不变；继续支持 JSON 导入恢复。
@@ -58,3 +58,7 @@
 ### 2026-10-05 — Reopened for implementation
 
 设计决议已完成，但当前仓库没有 SQLite 实现、Node.js API、适配器或迁移代码，`package.json` 也没有 SQLite 依赖。因此恢复为 `ready-for-agent`，实现验收项待实际代码和验证证据完成后逐项勾选。
+
+### 2026-10-05 — Closed after implementation verification
+
+实现了 Node 22 内置 SQLite 快照仓库、`127.0.0.1` API 服务、版本冲突保护、scrypt 会话认证、浏览器快照显式迁移、手动/每日/恢复前备份、恢复和命令行备份恢复入口。验证证据：`npm run typecheck`、`npm test`（13 个测试文件、50 项测试）、`npm run build`、`npm run verify:release`，以及隔离 HTTP smoke（health、setup、snapshot PUT、stale version 409、backup）。

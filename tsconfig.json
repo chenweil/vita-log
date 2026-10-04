@@ -15,5 +15,5 @@
     "lib": ["ES2022", "DOM"],
     "types": ["vitest/globals", "vite/client"]
   },
-  "include": ["src", "tests"]
+  "include": ["src", "server", "tests"]
 }

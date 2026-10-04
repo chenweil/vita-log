@@ -3,6 +3,8 @@ import { mountApp } from './app';
 import { ReadOnlyEditorAuth } from './auth';
 import { parsePublication, PublishedHealthRepository } from './publication';
 import { LocalStorageHealthRepository, type StorageLike } from './storage';
+import { SqliteHealthRepository } from './sqlite-storage';
+import { ServerEditorAuth } from './server-auth';
 
 function browserStorage(): StorageLike {
   try {
@@ -23,6 +25,8 @@ const publicationPath = new URLSearchParams(window.location.search).get('publica
 
 if (publicationPath) {
   void loadPublication(publicationPath);
+} else if (document.querySelector('meta[name="vita-log-storage"][content="sqlite"]')) {
+  mountApp(appContainer, new SqliteHealthRepository(), new ServerEditorAuth());
 } else {
   try {
     mountApp(container, new LocalStorageHealthRepository(browserStorage()));

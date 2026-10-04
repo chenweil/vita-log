@@ -4,7 +4,7 @@ import { deleteDiet, saveDiet } from './diet-editor';
 import { exportCsv, exportJson, importCsvPreview, importJsonPreview, type CsvKind, type TransferPreview } from './data-transfer';
 import { calculateBmi, calculateWhr, latestByDate, type DietRecord, type HealthSnapshot, type WeightRecord } from './domain';
 import { deleteMeasurement, deleteWeight, saveBodyRecords, type BodyRecordTarget } from './record-editor';
-import { StorageError, type HealthDataRepository, type LoadStatus } from './storage';
+import { LocalStorageHealthRepository, StorageError, type HealthDataRepository, type LoadStatus } from './storage';
 import { createPublication, serializePublication } from './publication';
 
 type StorageViewState = LoadStatus | 'saving' | 'saved' | 'error';
@@ -303,7 +303,9 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       main.insertAdjacentHTML('beforeend', `<section class="editor-section data-manager-section"><div class="section-heading"><div><p class="eyebrow">PUBLICATION · 发布</p><h2>只读分享</h2></div><span class="saved-note">公开快照</span></div><article class="card data-manager-card publication-card"><p>这是本人主动发布的只读快照，数据发布时间：<strong>${escapeHtml(published)}</strong>。</p><p class="muted">页面不会实时同步，也没有新增、编辑、删除、导入、清空或设置变更入口。访问者的操作不会写回本人的本地数据。</p></article></section>`);
       return;
     }
-    main.insertAdjacentHTML('beforeend', `<section class="editor-section data-manager-section"><div class="section-heading"><div><p class="eyebrow">DATA · 数据</p><h2>备份与导入</h2></div><span class="saved-note">JSON 完整备份 · CSV 分类交换</span></div><article class="card data-manager-card"><div class="transfer-actions"><button class="text-button" data-action="export-json" type="button">导出完整 JSON</button><button class="text-button" data-action="export-csv" data-kind="weight" type="button">导出体重 CSV</button><button class="text-button" data-action="export-csv" data-kind="measurement" type="button">导出围度 CSV</button><button class="text-button" data-action="export-csv" data-kind="checkin" type="button">导出打卡 CSV</button><button class="text-button" data-action="export-csv" data-kind="step" type="button">导出步数 CSV</button><button class="text-button" data-action="export-csv" data-kind="diet" type="button">导出饮食 CSV</button>${editing ? '<button class="primary-button" data-action="publish" type="button">生成只读发布快照</button>' : ''}</div>${editing ? `<p class="muted">发布只会生成一个下载文件，不会自动公开本地变化。将文件部署为 <code>vita-log-publication.json</code>，再以 <code>?publication=vita-log-publication.json</code> 打开分享页面。</p>` : '<p class="muted">进入本人编辑模式后可以导入备份、历史 CSV 或生成只读发布快照。</p>'}${publicationMessage ? `<p class="saved-note" role="status">${escapeHtml(publicationMessage)}</p>` : ''}${editing ? `<div class="import-controls"><label>导入类型<select id="transferKind"><option value="weight" ${transferKind === 'weight' ? 'selected' : ''}>体重</option><option value="measurement" ${transferKind === 'measurement' ? 'selected' : ''}>围度</option><option value="checkin" ${transferKind === 'checkin' ? 'selected' : ''}>打卡</option><option value="step" ${transferKind === 'step' ? 'selected' : ''}>步数</option><option value="diet" ${transferKind === 'diet' ? 'selected' : ''}>饮食</option></select></label><label class="file-button">选择 JSON/CSV<input id="transferFile" type="file" accept=".json,.csv,application/json,text/csv"></label></div><button class="text-button danger-text" data-action="clear-all" type="button">清空全部记录</button>` : ''}${transferMessage ? `<p class="form-error" role="alert">${escapeHtml(transferMessage)}</p>` : ''}${transferPreview ? renderTransferPreview(transferPreview) : ''}<div class="recovery-row"><span>${recoveryAvailable ? '已有可恢复快照' : '暂无恢复快照'}</span>${editing ? `<button class="text-button" data-action="restore-recovery" type="button" ${recoveryAvailable ? '' : 'disabled'}>恢复上一次快照</button>` : ''}</div></article></section>`);
+    const sqlite = repository as HealthDataRepository & { migrate?: (snapshot: HealthSnapshot) => Promise<void>; backup?: () => Promise<string>; restore?: (name: string) => Promise<void> };
+    const sqliteActions = sqlite.migrate && editing ? '<button class="text-button" data-action="migrate-sqlite" type="button">迁移浏览器快照到 SQLite</button><button class="text-button" data-action="backup-sqlite" type="button">备份 SQLite 数据库</button><button class="text-button" data-action="restore-sqlite" type="button">恢复 SQLite 备份</button>' : '';
+    main.insertAdjacentHTML('beforeend', `<section class="editor-section data-manager-section"><div class="section-heading"><div><p class="eyebrow">DATA · 数据</p><h2>备份与导入</h2></div><span class="saved-note">JSON 完整备份 · CSV 分类交换</span></div><article class="card data-manager-card"><div class="transfer-actions"><button class="text-button" data-action="export-json" type="button">导出完整 JSON</button><button class="text-button" data-action="export-csv" data-kind="weight" type="button">导出体重 CSV</button><button class="text-button" data-action="export-csv" data-kind="measurement" type="button">导出围度 CSV</button><button class="text-button" data-action="export-csv" data-kind="checkin" type="button">导出打卡 CSV</button><button class="text-button" data-action="export-csv" data-kind="step" type="button">导出步数 CSV</button><button class="text-button" data-action="export-csv" data-kind="diet" type="button">导出饮食 CSV</button>${sqliteActions}${editing ? '<button class="primary-button" data-action="publish" type="button">生成只读发布快照</button>' : ''}</div>${editing ? `<p class="muted">发布只会生成一个下载文件，不会自动公开本地变化。将文件部署为 <code>vita-log-publication.json</code>，再以 <code>?publication=vita-log-publication.json</code> 打开分享页面。</p>` : '<p class="muted">进入本人编辑模式后可以导入备份、历史 CSV 或生成只读发布快照。</p>'}${publicationMessage ? `<p class="saved-note" role="status">${escapeHtml(publicationMessage)}</p>` : ''}${editing ? `<div class="import-controls"><label>导入类型<select id="transferKind"><option value="weight" ${transferKind === 'weight' ? 'selected' : ''}>体重</option><option value="measurement" ${transferKind === 'measurement' ? 'selected' : ''}>围度</option><option value="checkin" ${transferKind === 'checkin' ? 'selected' : ''}>打卡</option><option value="step" ${transferKind === 'step' ? 'selected' : ''}>步数</option><option value="diet" ${transferKind === 'diet' ? 'selected' : ''}>饮食</option></select></label><label class="file-button">选择 JSON/CSV<input id="transferFile" type="file" accept=".json,.csv,application/json,text/csv"></label></div><button class="text-button danger-text" data-action="clear-all" type="button">清空全部记录</button>` : ''}${transferMessage ? `<p class="form-error" role="alert">${escapeHtml(transferMessage)}</p>` : ''}${transferPreview ? renderTransferPreview(transferPreview) : ''}<div class="recovery-row"><span>${recoveryAvailable ? '已有可恢复快照' : '暂无恢复快照'}</span>${editing ? `<button class="text-button" data-action="restore-recovery" type="button" ${recoveryAvailable ? '' : 'disabled'}>恢复上一次快照</button>` : ''}</div></article></section>`);
   };
 
   const bindDataManager = (): void => {
@@ -317,12 +319,57 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       publicationMessage = `已生成 ${formatPublicationDate(publication.publishedAt)} 的只读快照；本地变化不会自动公开。`;
       render();
     }));
+    container.querySelectorAll<HTMLElement>('[data-action="backup-sqlite"]').forEach((button) => button.addEventListener('click', () => { void backupSqlite(); }));
+    container.querySelectorAll<HTMLElement>('[data-action="migrate-sqlite"]').forEach((button) => button.addEventListener('click', () => { void migrateToSqlite(); }));
+    container.querySelectorAll<HTMLElement>('[data-action="restore-sqlite"]').forEach((button) => button.addEventListener('click', () => { void restoreSqlite(); }));
     container.querySelectorAll<HTMLSelectElement>('#transferKind').forEach((select) => select.addEventListener('change', () => { transferKind = select.value as CsvKind; }));
     container.querySelectorAll<HTMLInputElement>('#transferFile').forEach((input) => input.addEventListener('change', () => { const file = input.files?.[0]; if (file) void previewTransferFile(file); }));
     container.querySelectorAll<HTMLElement>('[data-action="cancel-transfer"]').forEach((button) => button.addEventListener('click', () => { transferPreview = null; transferMessage = ''; render(); }));
     container.querySelectorAll<HTMLElement>('[data-action="commit-transfer"]').forEach((button) => button.addEventListener('click', () => { void commitTransfer(); }));
     container.querySelectorAll<HTMLElement>('[data-action="restore-recovery"]').forEach((button) => button.addEventListener('click', () => { void restoreRecovery(); }));
     container.querySelectorAll<HTMLElement>('[data-action="clear-all"]').forEach((button) => button.addEventListener('click', () => { void clearAllRecords(); }));
+  };
+
+  const migrateToSqlite = async (): Promise<void> => {
+    const sqlite = repository as HealthDataRepository & { migrate?: (snapshot: HealthSnapshot) => Promise<void>; previewMigration?: (snapshot: HealthSnapshot) => Promise<{ empty: boolean; summary: { total: number; firstDate: string | null; lastDate: string | null; counts: Record<string, number>; settings: { name: string; heightCm: number; targetWeightKg: number } } }> };
+    if (!sqlite.migrate || !canEdit()) return;
+    try {
+      const local = await new LocalStorageHealthRepository(window.localStorage).load();
+      const preview = sqlite.previewMigration ? await sqlite.previewMigration(local.snapshot) : { empty: true, summary: { total: 0, firstDate: null, lastDate: null, counts: {}, settings: { name: '', heightCm: 0, targetWeightKg: 0 } } };
+      const count = preview.summary.total;
+      const range = preview.summary.firstDate ? `${preview.summary.firstDate} 至 ${preview.summary.lastDate}` : '无记录日期';
+      const breakdown = Object.entries(preview.summary.counts).map(([key, value]) => `${key} ${value}`).join('、');
+      const settings = `${preview.summary.settings.name || '未设置昵称'} · ${preview.summary.settings.heightCm} cm · 目标 ${preview.summary.settings.targetWeightKg} kg`;
+      if (!window.confirm(`迁移预览：浏览器快照 ${count} 条（${breakdown}；${range}；${settings}），SQLite ${preview.empty ? '为空，可迁移' : '已有数据，将拒绝自动迁移'}。确认迁移？`)) return;
+      await sqlite.migrate(local.snapshot);
+      snapshot = local.snapshot; persistedSnapshot = true; storageState = 'saved'; storageMessage = '已迁移到 SQLite'; transferMessage = '迁移完成；SQLite 现在是日常事实来源';
+    } catch (error) { transferMessage = error instanceof StorageError ? error.message : 'SQLite 迁移失败，当前数据未改变'; }
+    render();
+  };
+
+  const backupSqlite = async (): Promise<void> => {
+    const sqlite = repository as HealthDataRepository & { backup?: () => Promise<string> };
+    if (!sqlite.backup || !canEdit()) return;
+    try { transferMessage = `SQLite 备份完成：${await sqlite.backup()}`; } catch (error) { transferMessage = error instanceof StorageError ? error.message : 'SQLite 备份失败'; }
+    render();
+  };
+
+  const restoreSqlite = async (): Promise<void> => {
+    const sqlite = repository as HealthDataRepository & { listBackups?: () => Promise<Array<{ name: string; createdAt: string; summary: { total: number; firstDate: string | null; lastDate: string | null; settings: { name: string; heightCm: number; targetWeightKg: number } } }>>; restore?: (name: string) => Promise<void> };
+    if (!sqlite.listBackups || !sqlite.restore || !canEdit()) return;
+    try {
+      const backups = await sqlite.listBackups();
+      if (!backups.length) { transferMessage = '当前没有可恢复的 SQLite 备份'; render(); return; }
+      const choices = backups.map((backup, index) => `${index + 1}. ${backup.name} · 备份于 ${backup.createdAt} · ${backup.summary.total} 条 · ${backup.summary.firstDate ?? '无日期'} 至 ${backup.summary.lastDate ?? '无日期'} · ${backup.summary.settings.name || '未设置昵称'} · ${backup.summary.settings.heightCm} cm · 目标 ${backup.summary.settings.targetWeightKg} kg`).join('\n');
+      const selected = window.prompt(`选择要恢复的备份编号：\n${choices}`, '1');
+      const index = Number(selected) - 1;
+      const backup = Number.isInteger(index) ? backups[index] : undefined;
+      if (!backup || !window.confirm(`将先备份当前 SQLite，再恢复 ${backup.name}（${backup.summary.total} 条记录）。继续吗？`)) return;
+      await sqlite.restore(backup.name);
+      const loaded = await repository.load();
+      snapshot = loaded.snapshot; storageState = 'saved'; storageMessage = '已恢复 SQLite 备份'; transferMessage = `已恢复：${backup.name}`;
+    } catch (error) { transferMessage = error instanceof StorageError ? error.message : 'SQLite 恢复失败，当前数据未改变'; }
+    render();
   };
 
   const previewTransferFile = async (file: File): Promise<void> => {

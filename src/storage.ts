@@ -22,7 +22,7 @@ export interface HealthDataRepository {
   loadRecovery(): Promise<HealthSnapshot>;
 }
 
-export type StorageErrorCode = 'read-failed' | 'malformed' | 'write-failed' | 'recovery-unavailable';
+export type StorageErrorCode = 'read-failed' | 'malformed' | 'write-failed' | 'recovery-unavailable' | 'database-unavailable' | 'unauthorized' | 'version-conflict' | 'validation-failed' | 'migration-conflict' | 'backup-failed';
 
 export class StorageError extends Error {
   constructor(public readonly code: StorageErrorCode, message: string, options?: { cause?: unknown }) {
