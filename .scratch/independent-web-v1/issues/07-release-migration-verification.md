@@ -4,7 +4,7 @@
 
 **Blocked by:** 06: 只读发布快照与分享页面
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] 独立页面可以在目标静态托管环境访问。
 - [ ] 无 Workbuddy 网络或全局对象时，核心功能仍然可用。
@@ -13,3 +13,9 @@
 - [ ] 旧 Workbuddy 页面在验证期间作为只读回退，验证完成后不再作为生产入口。
 - [ ] 发布版本包含本地存储失败、导入失败和只读访问的可见提示。
 - [ ] 第一版发布验证覆盖移动和桌面浏览器的核心用户流程。
+
+## Comments
+
+### 2026-10-05 — Local release gates implemented
+
+新增 `npm run verify:release`：构建生产产物，在临时静态服务器读取首页和资源，并检查废弃的 Workbuddy 全局入口不会进入运行产物。新增发布验收 runbook，补充本地存储失败、导入失败和只读发布的 UI 回归测试。目标托管 URL、真实历史数据对账、新 JSON 备份、旧 Workbuddy 回退窗口以及真实移动/桌面浏览器证据仍未提供，因此票据保持 `claimed`，不标记为 resolved。

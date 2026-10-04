@@ -194,6 +194,46 @@ describe('static application boundary', () => {
     expect(container.querySelector('[data-action="publish"]')).toBeNull();
     expect(container.querySelector('[data-action="auth-toggle"]')).toBeNull();
   });
+
+  it('shows a visible import error without changing the owner snapshot', async () => {
+    const container = document.createElement('div');
+    document.body.append(container);
+    const snapshot = createEmptySnapshot('2026-10-05T00:00:00.000Z');
+    const repository = new FakeRepository({ snapshot, status: 'loaded' });
+    mountApp(container, repository, new FakeAuthUnlocked());
+    await Promise.resolve();
+
+    const input = container.querySelector<HTMLInputElement>('#transferFile');
+    if (!input) throw new Error('transfer file input missing');
+    const file = new File([''], 'unreadable.json', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: async () => { throw new Error('file unavailable'); } });
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(container.textContent).toContain('读取导入文件失败');
+    expect(repository.commits).toHaveLength(0);
+  });
+
+  it('shows invalid JSON in import preview and prevents committing it', async () => {
+    const container = document.createElement('div');
+    document.body.append(container);
+    const repository = new FakeRepository({ snapshot: createEmptySnapshot(), status: 'loaded' });
+    mountApp(container, repository, new FakeAuthUnlocked());
+    await Promise.resolve();
+    const input = container.querySelector<HTMLInputElement>('#transferFile');
+    if (!input) throw new Error('transfer file input missing');
+    const file = new File(['{bad json'], 'broken.json', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: async () => '{bad json' });
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(container.querySelector('.transfer-errors')?.textContent).toBeTruthy();
+    expect(container.querySelector<HTMLButtonElement>('[data-action="commit-transfer"]')?.disabled).toBe(true);
+    expect(repository.commits).toHaveLength(0);
+  });
 });
 
 class FakeAuthUnlocked implements EditorAuth {

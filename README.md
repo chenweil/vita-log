@@ -68,6 +68,14 @@ npm run build
 
 构建结果位于 `dist/`，可部署到任意静态托管（Cloudflare Pages / Vercel / NAS / 个人服务器）。生产环境建议使用 HTTPS，以保证浏览器存储与离线能力正常。直接双击源目录的 `index.html` 会显示启动说明，不会尝试加载 TypeScript。
 
+发布前检查：
+
+```bash
+npm run verify:release
+```
+
+该检查会验证生产入口、静态资源、临时静态服务器访问和废弃 Workbuddy 全局入口。真实托管、历史数据对账和旧页面下线按 [`docs/release-verification.md`](docs/release-verification.md) 的外部验收清单执行。
+
 ## 数据与迁移
 
 - JSON：完整备份与恢复格式（含设置、全部记录、稳定 ID、时间戳、版本号）
