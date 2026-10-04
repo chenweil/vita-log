@@ -4,16 +4,16 @@
 
 **Blocked by:** 01–05：独立静态页面、本人编辑、活动记录、饮食记录、备份与导入能力
 
-**Status:** resolved
+**Status:** ready-for-agent
 
-- [x] 明确 SQLite 文件、备份文件和服务器持久化数据卷的位置。
-- [x] 定义 Node.js API 的读取、写入、备份和恢复契约。
-- [x] 让现有 TypeScript 前端通过同一健康数据仓库契约选择 SQLite 适配器。
-- [x] 支持将当前 `localStorage` 快照一次性迁移到 SQLite。
+- [ ] 明确 SQLite 文件、备份文件和服务器持久化数据卷的位置。
+- [ ] 定义 Node.js API 的读取、写入、备份和恢复契约。
+- [ ] 让现有 TypeScript 前端通过同一健康数据仓库契约选择 SQLite 适配器。
+- [ ] 支持将当前 `localStorage` 快照一次性迁移到 SQLite。
 - [ ] 保留 JSON/CSV 导出作为人工备份和恢复路径。
-- [x] 明确本人编辑认证、只读访问和后端授权规则。
-- [x] 定义 SQLite 文件备份、恢复和写入失败时的恢复证据。
-- [x] 不在本票据中实现 Supabase；SQLite 适配器稳定后再单独设计 Supabase 适配器。
+- [ ] 明确本人编辑认证、只读访问和后端授权规则。
+- [ ] 定义 SQLite 文件备份、恢复和写入失败时的恢复证据。
+- [ ] 不在本票据中实现 Supabase；SQLite 适配器稳定后再单独设计 Supabase 适配器。
 
 ## Notes
 
@@ -52,3 +52,9 @@
 - API 错误使用稳定错误码区分未登录、版本冲突、校验失败、数据库不可用和迁移冲突；前端保留未提交输入，不自动覆盖。
 - 首期不做应用层数据库/备份加密，依赖本机文件权限；文档明确健康数据敏感，建议使用磁盘加密和受限目录。
 - SQLite 服务健康检查通过后页面显示“可迁移”；本人确认迁移成功后切换事实来源。禁止自动切换；localStorage 不作为持续双写副本。
+
+## Comments
+
+### 2026-10-05 — Reopened for implementation
+
+设计决议已完成，但当前仓库没有 SQLite 实现、Node.js API、适配器或迁移代码，`package.json` 也没有 SQLite 依赖。因此恢复为 `ready-for-agent`，实现验收项待实际代码和验证证据完成后逐项勾选。
