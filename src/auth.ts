@@ -4,6 +4,13 @@ export interface EditorAuth {
   lock(): void;
 }
 
+/** Authentication boundary used by a published reader page. */
+export class ReadOnlyEditorAuth implements EditorAuth {
+  isUnlocked(): boolean { return false; }
+  async unlock(_username: string, _password: string): Promise<boolean> { return false; }
+  lock(): void {}
+}
+
 interface SessionLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;

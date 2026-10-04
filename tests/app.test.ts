@@ -5,6 +5,8 @@ import { mountApp } from '../src/app';
 import { createEmptySnapshot, type HealthSnapshot } from '../src/domain';
 import type { EditorAuth } from '../src/auth';
 import { StorageError, type HealthDataRepository, type LoadResult } from '../src/storage';
+import { createPublication, PublishedHealthRepository } from '../src/publication';
+import { ReadOnlyEditorAuth } from '../src/auth';
 
 class FakeRepository implements HealthDataRepository {
   commits: HealthSnapshot[] = [];
@@ -172,6 +174,25 @@ describe('static application boundary', () => {
 
     expect(container.querySelector('.diet-form .form-error')?.textContent).toContain('本地健康数据保存失败');
     expect(container.textContent).toContain('本地健康数据保存失败');
+  });
+
+  it('renders a published snapshot with no mutation controls or owner unlock route', async () => {
+    const container = document.createElement('div');
+    document.body.append(container);
+    const snapshot = createEmptySnapshot('2026-10-05T00:00:00.000Z');
+    snapshot.settings.name = 'Published owner';
+    mountApp(container, new PublishedHealthRepository(createPublication(snapshot, '2026-10-05T01:02:03.000Z')), new ReadOnlyEditorAuth(), { mode: 'reader', publishedAt: '2026-10-05T01:02:03.000Z' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(container.textContent).toContain('只读发布快照');
+    expect(container.textContent).toContain('2026年10月5日');
+    expect(container.textContent).toContain('不是实时同步');
+    expect(container.textContent).not.toContain('进入编辑');
+    expect(container.querySelectorAll('form')).toHaveLength(0);
+    expect(container.querySelector('[data-action="clear-all"]')).toBeNull();
+    expect(container.querySelector('[data-action="publish"]')).toBeNull();
+    expect(container.querySelector('[data-action="auth-toggle"]')).toBeNull();
   });
 });
 
