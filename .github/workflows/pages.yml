@@ -1,0 +1,63 @@
+name: Deploy to GitHub Pages
+
+# 触发：推送 main；以及手动触发。
+# 项目页部署在 https://<owner>.github.io/<repo>/ 子路径下，
+# 因此构建时把 VITE_BASE 设为 /<repo>/，由 vite 输出带前缀的资源路径。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: 校验测试与类型
+        run: npm run typecheck && npm test
+
+      - name: 构建（子路径 base）
+        run: npm run build
+        env:
+          VITE_BASE: /${{ github.event.repository.name }}/
+
+      - name: 确认未把真实健康数据打进产物
+        run: |
+          if grep -rlE '晨起空腹|肉包子|肉夹馍' dist/ ; then
+            echo "::error::构建产物疑似包含真实健康数据，中止部署"
+            exit 1
+          fi
+          echo "产物中未发现真实健康数据样本"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
