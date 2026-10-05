@@ -11,7 +11,12 @@ export function createApi(store: SqliteStore, now: () => number = () => Date.now
     try {
       const url = new URL(request.url);
       const path = url.pathname;
-      if (url.hostname !== '127.0.0.1') throw new ApiError('unauthorized', '服务只允许本机访问', 403);
+      // No hostname allow-list here: the request layer must not assume a
+      // loopback deployment, because the Cloudflare Pages Function serving the
+      // same API answers on a public hostname. Every check below is relative to
+      // the request's own origin. The self-hosted Node process keeps its
+      // loopback-only posture at the listener (server/main.ts binds 127.0.0.1
+      // and rejects a mismatched Host header before calling this handler).
       if (request.method !== 'GET' && path !== '/api/backups') {
         const origin = request.headers.get('origin');
         const site = request.headers.get('sec-fetch-site');

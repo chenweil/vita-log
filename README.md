@@ -47,8 +47,9 @@
 ```text
 .
 ├── index.html                # 静态入口；双击打开只显示启动说明，不加载 TypeScript
-├── src/                      # 前端：领域模型、UI、存储适配器（localStorage / SQLite）
-├── server/                   # 自托管 Node.js SQLite 服务与 API
+├── src/                      # 前端：领域模型、UI、存储适配器（localStorage / SQLite / D1）
+├── server/                   # 自托管 Node.js SQLite 服务与 API（离线备份/恢复工具）
+├── functions/                # Cloudflare Pages Functions：同源 API 与 D1 建表 DDL
 ├── tests/                    # Vitest 单元与集成测试
 ├── scripts/                  # 发布校验（verify-release）与构建后处理
 ├── docs/                     # ADR、发布验收 runbook、SQLite 部署说明、Agent 约定
@@ -99,7 +100,7 @@ npm run verify:release
 运行模式与编辑权限：
 
 1. **纯静态模式**：浏览器本地数据可查看和导出，不提供编辑入口。
-2. **Cloudflare D1 模式（待 #06.1 实现）**：访客读取在线最新数据；本人通过服务端密码登录后编辑。服务端授权才是写入边界。当前本机 SQLite 模式仍可使用其服务端认证编辑。
+2. **Cloudflare D1 模式（#06.1 进行中）**：访客无需登录即可通过同源 Pages Functions 读取 D1 当前快照（`GET /api/snapshot`，`Cache-Control: no-store`，只投影昵称/记录/display-facing settings，不含凭据、会话、备份或内部元数据）；D1 不可用时返回 `503 database-unavailable`，页面不回退旧缓存、本机 SQLite 或空快照。本人通过服务端密码登录后编辑，服务端授权才是写入边界。仓库已交付读取与投影这一层（[票据 06.1-01](.scratch/independent-web-v1/issues/06.1-01-d1-public-read.md)）；写路径、会话与 UI 接线分别属于 06.1-02a/03 与 06.1-04。
 3. **只读发布模式**：本人主动生成只读快照对外分享，无任何写入入口。
 
 静态页面不再内置编辑凭据；公网编辑必须使用 Cloudflare Pages Functions 的服务端认证与权限。

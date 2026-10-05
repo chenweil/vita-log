@@ -366,6 +366,6 @@ function invalidBoolean(field: string): never {
   throw new DomainError(`${field}包含无效布尔值`);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
