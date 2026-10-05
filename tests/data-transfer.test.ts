@@ -48,11 +48,11 @@ describe('backup and import transfer', () => {
   });
 
   it('imports the exported diet column order without rejecting valid nutrients', () => {
-    const csv = '日期,餐次,食物,热量(kcal),蛋白质(g),脂肪(g),碳水(g),钠(mg),备注\n2026-08-05,早餐,肉包子（猪肉馅）×2,400,14,18,48,720,';
+    const csv = '日期,餐次,食物,热量(kcal),蛋白质(g),脂肪(g),碳水(g),钠(mg),备注\n2026-01-02,早餐,燕麦片,400,14,18,48,720,';
     const preview = importCsvPreview(createEmptySnapshot(NOW), 'diet', csv, NOW);
 
     expect(preview.valid).toBe(true);
     expect(preview.accepted).toBe(1);
-    expect(preview.snapshot?.diets[0]).toMatchObject({ food: '肉包子（猪肉馅）×2', calorie: 400, protein: 14, fat: 18, carb: 48, sodium: 720 });
+    expect(preview.snapshot?.diets[0]).toMatchObject({ food: '燕麦片', calorie: 400, protein: 14, fat: 18, carb: 48, sodium: 720 });
   });
 });

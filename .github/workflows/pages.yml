@@ -40,7 +40,7 @@ jobs:
 
       - name: 确认未把真实健康数据打进产物
         run: |
-          if grep -rlE '晨起空腹|肉包子|肉夹馍' dist/ ; then
+          if grep -rlE '肉包子|肉夹馍|晨起空腹' dist/ ; then
             echo "::error::构建产物疑似包含真实健康数据，中止部署"
             exit 1
           fi
