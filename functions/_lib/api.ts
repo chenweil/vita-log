@@ -52,14 +52,21 @@ export const noStore = (body: unknown, status: number, headers: Record<string, s
 /**
  * Require that a mutating request came from this origin.
  *
- * Three independent signals, because a cookie is attached automatically and one
- * check alone is a single point of failure:
+ * The load-bearing check is `Origin`. A cookie is attached automatically by the
+ * browser, so the server has to ask the browser where the request came from —
+ * and a browser always answers that on a write, and always answers it from the
+ * page that made the request. A missing Origin is therefore refused rather
+ * than assumed same-origin: "no evidence" is not "same origin".
  *
- * - `Origin` must be the request's own origin. A missing Origin is refused
- *   rather than assumed same-origin; a browser always sends it on a write.
- * - `Host` must match, so a forged Host cannot carry an otherwise-plausible
- *   Origin.
- * - `Sec-Fetch-Site: cross-site` is refused even if the two above agree.
+ * Two further signals sit behind it, and they are defence in depth rather than
+ * independent confirmation:
+ *
+ * - `Host` is required to be present and to match. The edge derives `url.origin`
+ *   from the same Host, so this does not by itself stop a forged Origin — it
+ *   refuses a request whose Host and Origin disagree, which is what a proxy or
+ *   a misrouted request looks like. A *missing* Host is refused rather than
+ *   skipped, so the check can never silently not run.
+ * - `Sec-Fetch-Site: cross-site` is refused even when the two above agree.
  *
  * No CORS headers are ever emitted, so there is no cross-origin client to
  * negotiate with in the first place.
@@ -70,7 +77,7 @@ export function requireSameOrigin(request: Request): void {
   if (origin !== url.origin) throw unauthorized('拒绝跨站写入请求', 403);
 
   const host = request.headers.get('host');
-  if (host !== null && host !== url.host) throw unauthorized('拒绝跨站写入请求', 403);
+  if (host === null || host !== url.host) throw unauthorized('拒绝跨站写入请求', 403);
 
   if (request.headers.get('sec-fetch-site') === 'cross-site') throw unauthorized('拒绝跨站写入请求', 403);
 }

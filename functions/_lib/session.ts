@@ -20,6 +20,8 @@ export const SESSION_MAX_AGE_SECONDS = SESSION_TTL_MS / 1000;
 export const SESSION_SELECT = 'SELECT expires_at FROM owner_session WHERE token_hash = ?';
 export const SESSION_INSERT = 'INSERT INTO owner_session (token_hash, expires_at) VALUES (?, ?)';
 export const SESSION_DELETE = 'DELETE FROM owner_session WHERE token_hash = ?';
+/** Reclaim rows whose 30 minutes are up; they are dead weight forever otherwise. */
+export const SESSION_PRUNE = 'DELETE FROM owner_session WHERE expires_at <= ?';
 
 /**
  * Cookie attributes, fixed.
@@ -119,13 +121,25 @@ export async function resolveSession(db: D1DatabaseLike | undefined, token: stri
   return { token, expiresAt };
 }
 
-/** Revoke a session immediately, so an open page cannot keep writing. */
-export async function revokeSession(db: D1DatabaseLike | undefined, token: string): Promise<void> {
-  if (!db || !token) return;
+/**
+ * Revoke a session immediately, so an open page cannot keep writing.
+ *
+ * A failure here is raised rather than swallowed. Reporting a successful logout
+ * when the row survived would tell the owner their session is gone while it
+ * stays usable for the rest of its 30 minutes — the opposite of what
+ * acceptance item 2 promises. The cookie is cleared either way, but the caller
+ * is told the truth about the server side.
+ *
+ * Lapsed rows are pruned on the way past. Nothing else would ever remove them,
+ * so the table would otherwise grow one dead row per login forever.
+ */
+export async function revokeSession(db: D1DatabaseLike | undefined, token: string, now: number): Promise<void> {
+  if (!token) return;
+  if (!db) throw new SessionStoreError('D1 数据库绑定缺失');
   try {
+    await db.prepare(SESSION_PRUNE).bind(now).run();
     await db.prepare(SESSION_DELETE).bind(await hashSessionToken(token)).run();
-  } catch {
-    // A logout that cannot reach D1 is still reported as logged out to the
-    // caller: the cookie is cleared, and at worst the row expires on its own.
+  } catch (error) {
+    throw new SessionStoreError('无法撤销编辑会话', { cause: error });
   }
 }

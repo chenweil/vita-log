@@ -19,6 +19,9 @@ import {
 
 const now = (): number => Date.now();
 
+/** One wording for every limiter, so the owner is never told which one tripped. */
+const TOO_MANY_ATTEMPTS = '尝试次数过多，请一分钟后重试';
+
 /**
  * Report the live session, if any. Reveals no credential material.
  *
@@ -41,28 +44,26 @@ export async function readSession(context: FunctionContext): Promise<Response> {
 /**
  * Exchange the owner's password for a session cookie.
  *
- * The write rate limit runs before the KDF, so a locked-out account costs no
- * PBKDF2 iterations. Both the account and the address are counted: the address
- * stops a spray across accounts, and the account stops a rotating address.
+ * The rate limit runs before the KDF, so an account that is already locked out
+ * costs no PBKDF2 iterations. Both the account and the address are counted: the
+ * address stops one attacker spraying across accounts, and the account stops
+ * one attacker rotating addresses.
  */
 export async function openOwnerSession(context: FunctionContext): Promise<Response> {
   requireSameOrigin(context.request);
   const ip = clientIp(context.request);
   const body = await readJsonBody(context.request);
-  const username = typeof body.username === 'string' ? body.username : '';
-  const account = accountKey(username);
-  const address = addressKey(ip);
+  const account = accountKey(typeof body.username === 'string' ? body.username : '');
 
-  for (const [key, message] of [[account, '尝试次数过多，请一分钟后重试'], [address, '尝试次数过多，请一分钟后重试']] as const) {
-    if (!consume(key, LOGIN_ATTEMPTS, now()).allowed) throw unauthorized(message, 429);
-  }
+  if (!consume(account, LOGIN_ATTEMPTS, now()).allowed) throw unauthorized(TOO_MANY_ATTEMPTS, 429);
+  if (!consume(addressKey(ip), LOGIN_ATTEMPTS, now()).allowed) throw unauthorized(TOO_MANY_ATTEMPTS, 429);
 
   if (!await verifyOwnerCredentials(context.env, body.username, body.password)) throw unauthorized('账号或密码错误');
 
   // A correct password restores the budget it spent, so a slip of the fingers
   // cannot lock the owner out of their own site.
   reset(account);
-  reset(address);
+  reset(addressKey(ip));
 
   const db = context.env.VITA_LOG_DB;
   if (!db) throw new ApiError('database-unavailable', '健康数据服务暂时不可用，请稍后重试', 503);
@@ -70,10 +71,15 @@ export async function openOwnerSession(context: FunctionContext): Promise<Respon
   return noStore({ loggedIn: true, until: session.expiresAt }, 200, { 'set-cookie': sessionCookie(session.token) });
 }
 
-/** Revoke the session server-side, so an open page stops being able to write. */
+/**
+ * Revoke the session server-side, so an open page stops being able to write.
+ *
+ * A store that cannot answer is a 503. Saying "logged out" while the row
+ * survived would tell the owner their editor rights are gone when they are not.
+ */
 export async function closeOwnerSession(context: FunctionContext): Promise<Response> {
   requireSameOrigin(context.request);
-  await revokeSession(context.env.VITA_LOG_DB, readSessionToken(context.request));
+  await guardSession(() => revokeSession(context.env.VITA_LOG_DB, readSessionToken(context.request), now()));
   return noStore({ loggedIn: false, until: 0 }, 200, { 'set-cookie': clearSessionCookie() });
 }
 

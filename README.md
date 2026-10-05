@@ -100,7 +100,7 @@ npm run verify:release
 运行模式与编辑权限：
 
 1. **纯静态模式**：浏览器本地数据可查看和导出，不提供编辑入口。
-2. **Cloudflare D1 模式（#06.1 进行中）**：访客无需登录即可通过同源 Pages Functions 读取 D1 当前快照（`GET /api/snapshot`，`Cache-Control: no-store`，只投影昵称/记录/display-facing settings，不含凭据、会话、备份或内部元数据）；D1 不可用时返回 `503 database-unavailable`，页面不回退旧缓存、本机 SQLite 或空快照。本人通过服务端密码登录后编辑，服务端授权才是写入边界。仓库已交付读取与投影这一层（[票据 06.1-01](.scratch/independent-web-v1/issues/06.1-01-d1-public-read.md)）；写路径、会话与 UI 接线分别属于 06.1-02a/03 与 06.1-04。
+2. **Cloudflare D1 模式（#06.1 进行中）**：访客无需登录即可通过同源 Pages Functions 读取 D1 当前快照（`GET /api/snapshot`，`Cache-Control: no-store`，只投影昵称/记录/display-facing settings，不含凭据、会话、备份或内部元数据）；D1 不可用时返回 `503 database-unavailable`，页面不回退旧缓存、本机 SQLite 或空快照。本人通过服务端密码登录后编辑，服务端授权才是写入边界。已交付读取与投影（[票据 06.1-01](.scratch/independent-web-v1/issues/06.1-01-d1-public-read.md)）与认证/会话/版本化写入（[票据 06.1-02a](.scratch/independent-web-v1/issues/06.1-02a-worker-auth-session.md)）：PBKDF2-HMAC-SHA-256/210k 校验部署 Secret，30 分钟绝对过期会话存 D1（只存令牌摘要），Cookie 为 `HttpOnly; Secure; SameSite=Strict; Path=/api`，写请求强制校验 `Origin`/`Host` 且不开放 CORS，登录按账号与 IP 双层限流。迁移、初始化封闭、备份审计与 UI 接线分别属于 06.1-03、06.1-02b、06.1-05 与 06.1-04。
 3. **只读发布模式**：本人主动生成只读快照对外分享，无任何写入入口。
 
 静态页面不再内置编辑凭据；公网编辑必须使用 Cloudflare Pages Functions 的服务端认证与权限。

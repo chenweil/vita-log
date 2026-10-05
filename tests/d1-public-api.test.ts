@@ -164,7 +164,7 @@ describe('Pages Function 公开读取契约', () => {
     const response = await onRequestPut({
       request: new Request('https://vita-log.pages.dev/api/snapshot', {
         method: 'PUT',
-        headers: { 'content-type': 'application/json', origin: 'https://vita-log.pages.dev' },
+        headers: { 'content-type': 'application/json', origin: 'https://vita-log.pages.dev', host: 'vita-log.pages.dev' },
         body: JSON.stringify({ snapshot: ownerSnapshot(), expectedVersion: 7 }),
       }),
       env: { VITA_LOG_DB: new FakeD1({ row: row(ownerSnapshot()) }) },

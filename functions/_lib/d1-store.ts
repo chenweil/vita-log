@@ -46,10 +46,19 @@ export const HEALTH_STATE_VERSION_QUERY = 'SELECT version FROM health_state WHER
  *
  * `version = ?` in the WHERE clause is what makes this safe: D1 reports how
  * many rows changed, and a save that lost the race changes none, so the caller
- * learns it is stale without a read-then-write gap in between. `saved_at` is
- * written from the same clock as the payload so the two cannot disagree.
+ * learns it is stale without a read-then-write gap in between.
+ *
+ * The SET clause has to advance `version` too, and that is not bookkeeping.
+ * Without it the stored version never changes, so every later write still
+ * matches the first one and the WHERE clause can never fire — two tabs would
+ * both save, both get 200, and one edit would vanish. The new value is computed
+ * here, in the same statement that checks the old one, so there is no window
+ * between "this is the current version" and "this becomes the next version".
+ *
+ * `saved_at` is written from the same clock as the payload, so the two cannot
+ * disagree.
  */
-export const HEALTH_STATE_WRITE = 'UPDATE health_state SET payload = ?, saved_at = ? WHERE id = ? AND version = ?';
+export const HEALTH_STATE_WRITE = 'UPDATE health_state SET payload = ?, saved_at = ?, version = ? WHERE id = ? AND version = ?';
 
 /**
  * Read the versioned snapshot D1 holds as the online source of truth.
@@ -133,10 +142,11 @@ export async function commitHealthState(
   if (!db) throw new D1UnavailableError('D1 数据库绑定缺失');
   const savedAt = new Date(now).toISOString();
   const next: HealthSnapshot = { ...normalizeSnapshot(snapshot), updatedAt: savedAt };
+  const nextVersion = expectedVersion + 1;
 
   let changes: number | undefined;
   try {
-    const result = await db.prepare(HEALTH_STATE_WRITE).bind(JSON.stringify(next), savedAt, 1, expectedVersion).run();
+    const result = await db.prepare(HEALTH_STATE_WRITE).bind(JSON.stringify(next), savedAt, nextVersion, 1, expectedVersion).run();
     changes = result?.meta?.changes;
   } catch (error) {
     throw new D1UnavailableError('D1 健康数据保存失败', { cause: error });
@@ -158,7 +168,7 @@ export async function commitHealthState(
   // also a failed write: claiming success here would tell the owner their data
   // is saved when it may not be.
   if (changes === undefined) throw new D1UnavailableError('D1 未返回保存结果');
-  return { version: expectedVersion + 1, savedAt };
+  return { version: nextVersion, savedAt };
 }
 
 /** Whether D1 holds a health row at all. Used only on the failed-write path. */

@@ -4,13 +4,16 @@ import {
   readHealthState, readHealthStateVersion, type D1DatabaseLike,
 } from '../_lib/d1-store';
 import { ApiError, readJsonBody, requireSameOrigin, unauthorized, versionConflict, type FunctionContext } from '../_lib/api';
-import { consume, sessionKey, WRITE_ATTEMPTS } from '../_lib/rate-limit';
+import { addressKey, clientIp, consume, sessionKey, WRITE_ATTEMPTS } from '../_lib/rate-limit';
 import { readSessionToken, resolveSession, SessionStoreError } from '../_lib/session';
 
 /** The subset of the Pages Functions context this route reads. */
 export type SnapshotContext = FunctionContext;
 
 const now = (): number => Date.now();
+
+/** One wording for the write limiter, so it never reveals which key tripped. */
+const TOO_MANY_WRITES = '保存过于频繁，请稍后重试';
 
 /** Health responses are never cached: "refresh shows the latest save" depends on it. */
 const respond = (body: unknown, status: number, headers: Record<string, string> = {}): Response =>
@@ -60,9 +63,11 @@ export async function handleOwnerSave(context: SnapshotContext): Promise<Respons
     .catch(() => { throw new ApiError('database-unavailable', '健康数据服务暂时不可用，请稍后重试', 503); });
   if (!session) throw unauthorized('编辑会话已失效，请重新登录');
 
-  if (!consume(sessionKey(session.token), WRITE_ATTEMPTS, now()).allowed) {
-    throw unauthorized('保存过于频繁，请稍后重试', 429);
-  }
+  // Both dimensions the spec names for the write path. The session key stops
+  // one editor from flooding; the address key still binds if the WAF layer in
+  // front is not yet configured for this route.
+  if (!consume(sessionKey(session.token), WRITE_ATTEMPTS, now()).allowed) throw unauthorized(TOO_MANY_WRITES, 429);
+  if (!consume(addressKey(clientIp(context.request)), WRITE_ATTEMPTS, now()).allowed) throw unauthorized(TOO_MANY_WRITES, 429);
 
   const body = await readJsonBody(context.request);
   const expectedVersion = Number(body.expectedVersion);
