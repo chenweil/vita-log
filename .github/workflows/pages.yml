@@ -40,7 +40,10 @@ jobs:
 
       - name: 确认未把真实健康数据打进产物
         run: |
-          if grep -rlE '肉包子|肉夹馍|晨起空腹' dist/ ; then
+          # 只检测真实历史数据中独有的具体食物名。
+          # 不要加入「晨起空腹」这类通用词——它是输入框 placeholder 文案，
+          # 会让所有用户构建的产物都命中，导致误报。
+          if grep -rlE '肉包子|肉夹馍' dist/ ; then
             echo "::error::构建产物疑似包含真实健康数据，中止部署"
             exit 1
           fi
