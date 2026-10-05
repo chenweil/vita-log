@@ -1,4 +1,4 @@
-import { ClientEditorAuth, type EditorAuth } from './auth';
+import { ReadOnlyEditorAuth, type EditorAuth } from './auth';
 import { deleteStep, saveStep, toggleCheckin } from './activity-editor';
 import { deleteDiet, saveDiet } from './diet-editor';
 import { exportCsv, exportJson, importCsvPreview, importJsonPreview, type CsvKind, type TransferPreview } from './data-transfer';
@@ -55,7 +55,7 @@ const emptyStepForm = (): StepFormState => ({ targetId: null, date: localDate(ne
 const emptyDietForm = (): DietFormState => ({ targetId: null, date: localDate(new Date()), meal: '早餐', food: '', calorie: '', protein: '', fat: '', carb: '', sodium: '', note: '', error: '', aiText: '' });
 const DIET_PROMPT = '请根据我提供的餐食照片或商品包装，识别食物和份量，只返回 JSON：{"food":"...","calorie":0,"protein":0,"fat":0,"carb":0,"sodium":0,"note":"估算依据"}。数值使用 kcal、g、mg。';
 
-export function mountApp(container: HTMLElement, repository: HealthDataRepository, auth: EditorAuth = new ClientEditorAuth(), options: AppMountOptions = {}): () => void {
+export function mountApp(container: HTMLElement, repository: HealthDataRepository, auth: EditorAuth = new ReadOnlyEditorAuth(), options: AppMountOptions = {}): () => void {
   const readerMode = options.mode === 'reader';
   const canEdit = (): boolean => !readerMode && auth.isUnlocked();
   let snapshot: HealthSnapshot | null = null;

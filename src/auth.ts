@@ -36,23 +36,13 @@ export interface EditorAuthConfig {
   configVersion: number;
 }
 
-export const DEFAULT_EDITOR_AUTH: EditorAuthConfig = {
-  enabled: true,
-  username: 'redacted',
-  passwordHash: '',
-  salt: '',
-  iterations: 210000,
-  sessionMinutes: 30,
-  configVersion: 1,
-};
-
 const SESSION_KEY = 'vita-log:editor-session';
 
 export class ClientEditorAuth implements EditorAuth {
   private unlockedUntil = 0;
 
   constructor(
-    private readonly config: EditorAuthConfig = DEFAULT_EDITOR_AUTH,
+    private readonly config: EditorAuthConfig,
     private readonly session: SessionLike | null = typeof window === 'undefined' ? null : window.sessionStorage,
     private readonly cryptoProvider: CryptoLike | null = typeof window === 'undefined' ? null : window.crypto,
     private readonly now: () => number = () => Date.now(),
