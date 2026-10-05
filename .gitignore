@@ -1,6 +1,7 @@
 # 本地 Agent 技能（软链接到本机 skillcaddy，不进库）
 .agents/
 .claude/
+.workbuddy/
 
 # Node.js toolchain
 node_modules/
