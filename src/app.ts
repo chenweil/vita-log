@@ -82,6 +82,9 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     }
     editing = canEdit();
     container.innerHTML = renderDashboard(snapshot, storageState, storageMessage, editing, formState, stepForm, dietForm, selectedDate, authOpen, readerMode, options.publishedAt);
+    if (auth instanceof ReadOnlyEditorAuth) {
+      container.querySelectorAll('[data-action="auth-toggle"]').forEach(control => control.remove());
+    }
     bindEvents();
     bindDataManager();
   };
