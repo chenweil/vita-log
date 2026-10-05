@@ -2,6 +2,8 @@
 
 Status: ready-for-agent
 
+Cloudflare 公网实时访问扩展见 [`spec-06.1-realtime-public-access.md`](spec-06.1-realtime-public-access.md)。该扩展覆盖 Cloudflare Pages + Pages Functions + D1 的在线事实来源、服务端编辑授权和公网验收，并对本文件中关于“SQLite/D1 未来可选适配器”的第一版本地部署描述做范围限定。
+
 输入依据：初期需求文档、现有两个 HTML 实现及后续需求澄清  
 目标版本：第一版独立部署  
 决策状态：架构方向已收敛；部署平台和历史数据文件格式在实施前确认
