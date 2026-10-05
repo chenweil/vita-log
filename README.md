@@ -31,25 +31,37 @@
 
 - 第一版：独立静态单页 + 浏览器本地存储 + CSV/JSON 导入导出
 - 腾讯云文档只做一次性历史数据导入来源，不接 API、不做持续同步
-- SQLite 自托管适配器已提供；Supabase / Cloudflare D1 仍作为未来云端适配器，不锁死
+- SQLite 自托管适配器已提供（本机 Node.js 服务 + 版本化快照仓库）
+- 云端适配器方向已定为 Cloudflare Pages + Pages Functions + D1，不再提 Supabase；D1 为唯一在线事实来源，本机 SQLite 只做离线备份/恢复副本，不双写。详见 [ADR-0002](docs/adr/0002-cloudflare-realtime-public-access.md)
 
-详见：
+已入库的设计依据：
 
-- `轻盈计划独立部署_初期需求.md`
-- `轻盈计划独立部署_设计文稿.md`
+- [`docs/adr/0001-sqlite-local-persistence.md`](docs/adr/0001-sqlite-local-persistence.md)：SQLite 持久化层
+- [`docs/adr/0002-cloudflare-realtime-public-access.md`](docs/adr/0002-cloudflare-realtime-public-access.md)：云端实时访问与写入授权
+- [`.scratch/independent-web-v1/spec.md`](.scratch/independent-web-v1/spec.md) 及 `issues/`：第一阶段 spec 与票据
+
+需求基线与第一版设计文稿（`轻盈计划独立部署_初期需求.md`、`轻盈计划独立部署_设计文稿.md`）只在本机保留，不随公开仓库发布。
 
 ## 仓库结构
 
 ```text
 .
-├── README.md
-├── qingying_workspace.html            # 旧 Workbuddy 版本（参考实现，不再作为生产入口）
-├── 轻盈计划减脂健身追踪台.html          # 较新的本地化版本（行为与视觉参考）
-├── 轻盈计划独立部署_初期需求.md         # 需求基线
-└── 轻盈计划独立部署_设计文稿.md         # 第一版设计（数据模型、存储契约、导入/发布规则）
+├── index.html                # 静态入口；双击打开只显示启动说明，不加载 TypeScript
+├── src/                      # 前端：领域模型、UI、存储适配器（localStorage / SQLite）
+├── server/                   # 自托管 Node.js SQLite 服务与 API
+├── tests/                    # Vitest 单元与集成测试
+├── scripts/                  # 发布校验（verify-release）与构建后处理
+├── docs/                     # ADR、发布验收 runbook、SQLite 部署说明、Agent 约定
+├── .scratch/                 # 本地 spec 与 issue 票据（路线图的事实来源）
+├── .github/workflows/        # CI
+└── package.json / tsconfig.json / vite.config.ts / vitest.config.ts
 ```
 
-> 独立版实现切流完成后，两个旧 HTML 只保留为参考证据，不再作为并行生产入口。
+本机还保留以下参考与基线文件，但它们被 `.gitignore` 排除，不随公开仓库发布：
+
+- `qingying_workspace.html`：旧 Workbuddy 版本（参考实现，不再作为生产入口）
+- `轻盈计划减脂健身追踪台.html`：较新的本地化版本（行为与视觉参考）
+- `轻盈计划独立部署_初期需求.md`、`轻盈计划独立部署_设计文稿.md`：需求基线与第一版设计
 
 ## 快速开始
 
@@ -93,14 +105,25 @@ npm run verify:release
 
 ## 路线图
 
+计划与票据在 `.scratch/independent-web-v1/`，架构决定在 `docs/adr/`。
+
+### 第一阶段：独立静态版（功能已交付，待目标环境取证）
+
 - [x] 需求基线 + 第一版设计
-- [ ] 独立静态单页（去 Workbuddy 依赖）
-- [ ] 本地存储适配器 + 统一数据仓库接口
-- [ ] CSV/JSON 导入导出 + 恢复点
-- [ ] 本人编辑 / 只读发布
-- [ ] 腾讯云文档历史数据一次性迁移验证 + 新 JSON 备份
-- [ ] 下线旧 Workbuddy 页面
-- SQLite 自托管模式已提供本机 Node.js 服务和版本化快照仓库，见 [`docs/sqlite-self-hosted.md`](docs/sqlite-self-hosted.md)。云端适配器、多端同步、自动发布仍待后续设计。
+- [x] 独立静态单页（去 Workbuddy 依赖）+ 本地存储适配器与统一数据仓库接口
+- [x] 本人编辑权限与体重围度追踪
+- [x] 步数、训练习惯与行动日历
+- [x] 饮食记录与营养目标
+- [x] CSV/JSON 导入导出 + 恢复点 + 腾讯云文档历史数据一次性迁移
+- [x] 只读发布快照分享
+- [x] SQLite 自托管持久化层（本机 Node.js 服务 + 版本化快照仓库，见 [ADR-0001](docs/adr/0001-sqlite-local-persistence.md) 与 [`docs/sqlite-self-hosted.md`](docs/sqlite-self-hosted.md)）
+
+真实历史数据已迁移并对账：体重 11 条、围度 3 条、饮食 116 条，三类文件零错误；迁移后生成的完整 JSON 备份已用 `importJsonPreview` 回读验证（`accepted=130`、零错误）。对账明细见 [票据 07](.scratch/independent-web-v1/issues/07-release-migration-verification.md)。
+
+### 待完成
+
+- [ ] **目标环境发布验收**（[票据 07](.scratch/independent-web-v1/issues/07-release-migration-verification.md)）：部署到真实静态托管、真实浏览器桌面与移动流程验证、旧 Workbuddy 页面确认下线。仓库内可复跑的发布门禁（`npm run verify:release`）已经就位，缺的是目标 URL 和真实浏览器证据——见 [`docs/release-verification.md`](docs/release-verification.md) 的外部验收清单。
+- [ ] **Cloudflare 实时公开读取与服务端编辑授权**（[票据 06.1](.scratch/independent-web-v1/issues/06.1-realtime-public-read-server-auth.md)）：访客读取服务端最新数据，本人凭密码登录后才能编辑。方案已定，见 [ADR-0002](docs/adr/0002-cloudflare-realtime-public-access.md)——Cloudflare Pages + Pages Functions + D1，D1 为唯一在线事实来源，本机 SQLite 退为离线备份/恢复副本。票据 06 的静态只读快照继续保留，但只作为非实时分享。
 
 ## 隐私
 
