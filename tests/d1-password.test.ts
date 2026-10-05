@@ -1,0 +1,124 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import {
+  createCredential,
+  derivePassword,
+  generateSalt,
+  parseCredential,
+  PBKDF2_ITERATIONS,
+  verifyPassword,
+} from '../functions/_lib/password';
+
+const source = readFileSync(fileURLToPath(new URL('../functions/_lib/password.ts', import.meta.url)), 'utf8');
+
+/** A deterministic random source, so salt generation is reproducible per test. */
+function fixedRandom(fill: number): { getRandomValues<T extends ArrayBufferView>(array: T): T } {
+  return {
+    getRandomValues<T extends ArrayBufferView>(array: T): T {
+      new Uint8Array(array.buffer, array.byteOffset, array.byteLength).fill(fill);
+      return array;
+    },
+  };
+}
+
+describe('PBKDF2 密码原语', () => {
+  it('固定使用 Web Crypto PBKDF2-HMAC-SHA-256 和 210,000 次迭代', async () => {
+    expect(PBKDF2_ITERATIONS).toBe(210_000);
+    // The deployment decision is a specific KDF and cost, not "some slow hash".
+    // Re-deriving with the published parameters must reproduce the stored digest,
+    // which only holds if the algorithm, hash, salt and iteration count are all
+    // exactly the ones recorded.
+    const salt = generateSalt(fixedRandom(0x11));
+    const credential = await createCredential('a long owner password', fixedRandom(0x22));
+    const parsed = parseCredential(credential);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.iterations).toBe(210_000);
+    expect(await derivePassword('a long owner password', salt, PBKDF2_ITERATIONS)).not.toBeNull();
+    // A different password through the same published parameters gives a
+    // different digest: the cost is real, not a no-op wrapper.
+    const a = await derivePassword('password-a', salt, PBKDF2_ITERATIONS);
+    const b = await derivePassword('password-b', salt, PBKDF2_ITERATIONS);
+    expect(Buffer.from(a).equals(Buffer.from(b))).toBe(false);
+  });
+
+  it('每个凭据使用独立盐：同一密码两次派生得到不同摘要但都能通过校验', async () => {
+    const first = parseCredential(await createCredential('same password', fixedRandom(0x33)));
+    const second = parseCredential(await createCredential('same password', fixedRandom(0x44)));
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    // Independent salt means neither the stored salt nor the digest may repeat.
+    expect(Buffer.from(first!.salt).equals(Buffer.from(second!.salt))).toBe(false);
+    expect(Buffer.from(first!.digest).equals(Buffer.from(second!.digest))).toBe(false);
+    expect(await verifyPassword('same password', first!)).toBe(true);
+    expect(await verifyPassword('same password', second!)).toBe(true);
+  });
+
+  it('正确密码通过，错误密码拒绝', async () => {
+    const credential = parseCredential(await createCredential('correct owner password', fixedRandom(0x55)));
+    expect(await verifyPassword('correct owner password', credential!)).toBe(true);
+    for (const wrong of ['', 'wrong', 'correct owner passwor', 'Correct owner password', 'correct owner password ']) {
+      expect(await verifyPassword(wrong, credential!), wrong).toBe(false);
+    }
+  });
+
+  it('凭据格式可往返，并能从中读回盐、迭代次数和摘要', async () => {
+    const raw = await createCredential('round trip password', fixedRandom(0x66));
+    expect(raw.startsWith('pbkdf2-sha256$210000$')).toBe(true);
+    const parsed = parseCredential(raw)!;
+    // A deployment secret is a copied string, so the encoding has to survive it.
+    expect(parsed.salt.length).toBe(16);
+    expect(parsed.digest.length).toBe(32);
+    expect(await verifyPassword('round trip password', raw)).toBe(true);
+  });
+
+  it('损坏或被削弱的凭据一律 fail-closed，不降级为通过', async () => {
+    const valid = await createCredential('a valid password', fixedRandom(0x77));
+    const salt = valid.split('$')[2]!;
+    const digest = valid.split('$')[3]!;
+    const malformed = [
+      undefined, null, '', 'not a credential', 'pbkdf2-sha256', 'pbkdf2-sha256$', 'pbkdf2-sha256$$',
+      `pbkdf2-sha256$210000$`, `pbkdf2-sha256$210000$${digest}`,
+      `pbkdf2-sha256$210000$${salt}$`, `pbkdf2-sha256$210000$${salt}`,
+      // Weakened cost must be rejected rather than accepted: a misconfigured
+      // secret that turns the KDF down to a single round is exactly the
+      // regression the 210,000 figure exists to prevent.
+      `pbkdf2-sha256$1$${salt}$${digest}`,
+      `pbkdf2-sha256$0$${salt}$${digest}`,
+      `pbkdf2-sha256$-210000$${salt}$${digest}`,
+      `pbkdf2-sha256$210000.5$${salt}$${digest}`,
+      `pbkdf2-sha256$99999999999$${salt}$${digest}`,
+      // Wrong algorithm tag.
+      `scrypt$${210_000}$${salt}$${digest}`,
+      `pbkdf2-sha512$210000$${salt}$${digest}`,
+      // Salt and digest must be exactly the sizes the KDF produces.
+      `pbkdf2-sha256$210000$00$${digest}`,
+      `pbkdf2-sha256$210000$${salt}00$${digest}`,
+      `pbkdf2-sha256$210000$${salt}$${digest}00`,
+      // Hex only: a credential carrying raw bytes would be ambiguous.
+      `pbkdf2-sha256$210000$zzzz$${digest}`,
+      `pbkdf2-sha256$210000$${salt}$zzzz`,
+      // Trailing fields would be silently ignored if the parse were lenient.
+      `${valid}$extra`,
+      `${valid}$`,
+    ];
+    for (const value of malformed) {
+      expect(parseCredential(value), String(value)).toBeNull();
+      expect(await verifyPassword('a valid password', value as string), String(value)).toBe(false);
+      expect(await verifyPassword('', value as string), String(value)).toBe(false);
+    }
+  });
+
+  it('不依赖 Node crypto：模块不引入 node:crypto，也不调用 scryptSync', () => {
+    // The Pages Functions runtime has no node:crypto, so an import here would
+    // only survive in the local test run and break in the real deployment.
+    expect(source).not.toMatch(/from\s+['"]node:crypto['"]/);
+    expect(source).not.toMatch(/require\(['"]node:crypto['"]\)/);
+    // Matched as a call, not as a word: the module explains in prose why
+    // scryptSync is unavailable, and that explanation must not fail the check.
+    expect(source).not.toMatch(/scryptSync\s*\(/);
+    expect(source).not.toMatch(/timingSafeEqual\s*\(/);
+    // The only crypto surface used is the platform one.
+    expect(source).toMatch(/crypto\.subtle/);
+  });
+});

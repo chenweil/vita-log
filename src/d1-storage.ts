@@ -20,6 +20,7 @@ const SERVER_ERROR_CODES = new Set<StorageError['code']>([
  * visitor having no health data at all.
  */
 export class D1HealthRepository implements HealthDataRepository {
+  private version = 0;
   constructor(private readonly client: Fetcher = window) {}
 
   async load(): Promise<LoadResult> {
@@ -40,13 +41,76 @@ export class D1HealthRepository implements HealthDataRepository {
     }
   }
 
-  /** Writes arrive with the owner's server session in 06.1-02a; until then this reader stays read-only. */
-  async commit(_snapshot: HealthSnapshot): Promise<void> {
-    throw new StorageError('write-failed', '当前是只读公开读取模式，尚未开放服务端保存');
+  /**
+   * Save a versioned snapshot through the owner's server session.
+   *
+   * The version is read from the session endpoint rather than from `load()`:
+   * the public projection leaves it out on purpose, as internal storage
+   * metadata, so an editing client has to ask for it where the request is
+   * already authenticated. Reading it immediately before the write is also
+   * what makes the conflict real — two tabs saving at once, one of them losing.
+   *
+   * Nothing local is discarded when the save is refused. A `version-conflict`
+   * propagates with the server's own wording so the page can keep the owner's
+   * unsubmitted input on screen and ask them to reload before retrying.
+   */
+  async commit(snapshot: HealthSnapshot): Promise<void> {
+    const session = await this.session();
+    if (!session.loggedIn) throw new StorageError('unauthorized', '编辑会话已失效，请重新登录');
+
+    let response: Response;
+    try {
+      response = await this.client.fetch('/api/snapshot', {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ snapshot, expectedVersion: session.version }),
+      });
+    } catch (error) {
+      throw new StorageError('database-unavailable', '健康数据服务暂时不可用，请稍后重试', { cause: error });
+    }
+
+    if (!response.ok) throw await this.errorFrom(response);
+
+    try {
+      const saved = await response.json() as { version?: unknown };
+      this.version = Number.isSafeInteger(saved.version) ? Number(saved.version) : session.version;
+    } catch (error) {
+      throw new StorageError('database-unavailable', '健康数据服务返回了无法识别的内容，请稍后重试', { cause: error });
+    }
+  }
+
+  /** The version last seen or last written, for a caller that wants to inspect it. */
+  get currentVersion(): number {
+    return this.version;
   }
 
   async loadRecovery(): Promise<HealthSnapshot> {
     throw new StorageError('recovery-unavailable', '公开读取模式没有恢复快照');
+  }
+
+  /**
+   * Ask the server whether this browser still holds an editing session, and
+   * for the version its next write must carry.
+   */
+  private async session(): Promise<{ loggedIn: boolean; version: number }> {
+    let response: Response;
+    try {
+      response = await this.client.fetch('/api/session', { credentials: 'same-origin', cache: 'no-store' });
+    } catch (error) {
+      throw new StorageError('database-unavailable', '健康数据服务暂时不可用，请稍后重试', { cause: error });
+    }
+    if (!response.ok) throw await this.errorFrom(response);
+    try {
+      const state = await response.json() as { loggedIn?: unknown; version?: unknown };
+      const version = Number(state.version);
+      return {
+        loggedIn: state.loggedIn === true,
+        version: Number.isSafeInteger(version) && version >= 0 ? version : this.version,
+      };
+    } catch (error) {
+      throw new StorageError('database-unavailable', '健康数据服务返回了无法识别的内容，请稍后重试', { cause: error });
+    }
   }
 
   private async errorFrom(response: Response): Promise<StorageError> {

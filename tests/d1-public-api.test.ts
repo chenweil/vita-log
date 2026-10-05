@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createEmptySnapshot, type HealthSnapshot } from '../src/domain';
-import { onRequest, onRequestGet } from '../functions/api/snapshot';
+import { onRequest, onRequestGet, onRequestPut } from '../functions/api/snapshot';
 import type { D1DatabaseLike, D1Statement } from '../functions/_lib/d1-store';
 
 const ownerSnapshot = (): HealthSnapshot => {
@@ -34,6 +34,12 @@ class FakeD1 implements D1DatabaseLike {
         if ('error' in behaviour) throw behaviour.error;
         if ('noRow' in behaviour) return null;
         return behaviour.row as T;
+      },
+      // This anonymous reader never writes. Refusing here is a stronger
+      // statement than returning a fake result: a write reaching the public
+      // read path at all would mean the route stopped dispatching on method.
+      run: async (): Promise<{ meta: { changes: number } }> => {
+        throw new Error(`unexpected write on the public read path: ${query}`);
       },
     };
   }
@@ -142,12 +148,28 @@ describe('Pages Function 公开读取契约', () => {
     expect((await call(db)).status).toBe(200);
   });
 
-  it('非 GET 方法被明确拒绝，且同样 no-store', async () => {
-    for (const method of ['PUT', 'POST', 'DELETE', 'PATCH']) {
+  it('非 GET/PUT 方法被明确拒绝，且同样 no-store', async () => {
+    for (const method of ['POST', 'DELETE', 'PATCH']) {
       const response = await onRequest({ request: new Request('https://vita-log.pages.dev/api/snapshot', { method }), env: { VITA_LOG_DB: new FakeD1({ row: row(ownerSnapshot()) }) } });
       expect(response.status, method).toBe(405);
       expect(response.headers.get('cache-control'), method).toBe('no-store');
       expect((await response.json() as { code: string }).code, method).toBe('validation-failed');
     }
+  });
+
+  it('匿名 PUT 走写入授权路径而不是公开读取，未授权即被拒绝', async () => {
+    // 06.1-02a added the owner save. It is still refused here — the point of
+    // this case is that a write can no longer be dismissed as "wrong method",
+    // it has to clear a session first.
+    const response = await onRequestPut({
+      request: new Request('https://vita-log.pages.dev/api/snapshot', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', origin: 'https://vita-log.pages.dev' },
+        body: JSON.stringify({ snapshot: ownerSnapshot(), expectedVersion: 7 }),
+      }),
+      env: { VITA_LOG_DB: new FakeD1({ row: row(ownerSnapshot()) }) },
+    });
+    expect(response.status).toBe(401);
+    expect((await response.json() as { code: string }).code).toBe('unauthorized');
   });
 });
