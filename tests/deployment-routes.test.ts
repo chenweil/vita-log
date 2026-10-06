@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SqliteD1 } from './support/sqlite-d1';
+import { stripComments } from './support/strip-comments';
 
 const functionsDirectory = new URL('../functions/', import.meta.url).pathname;
 const apiDirectory = join(functionsDirectory, 'api');
@@ -27,6 +28,22 @@ const clientCalls = (source: string): Array<{ url: string; method: string }> => 
   return found;
 };
 
+/**
+ * Every `/api/...` literal in the source, however it is referenced.
+ *
+ * `clientCalls` only sees a URL when it is passed straight to `fetch`. A route
+ * chosen by a variable — `fetch(endpoint)` — is invisible to it, which is how a
+ * client kept a `/api/setup` fallback that no deployment served while every one
+ * of these tests stayed green. Scanning the literals closes that: a named route
+ * the deployment does not serve is a runtime 404 regardless of how it is
+ * referenced. Template literals count, so a backtick cannot become the way past
+ * this check; comments are stripped first so that the prose explaining why
+ * `/api/setup` is gone is not mistaken for a call to it.
+ */
+const apiLiterals = (source: string): string[] => [...new Set(
+  [...stripComments(source).matchAll(/['"`](\/api\/[A-Za-z0-9_/-]+)['"`]/g)].map((match) => match[1]!),
+)];
+
 describe('部署路由与浏览器适配器一致', () => {
   it('Pages Functions 暴露的 API 路由就是文件列表', () => {
     expect([...deployedRoutes()].sort()).toEqual(['/api/login', '/api/logout', '/api/session', '/api/snapshot']);
@@ -42,6 +59,9 @@ describe('部署路由与浏览器适配器一致', () => {
       // also handles mutations; every URL still has to resolve to a real file.
       expect(routes, `${call.method} ${call.url} 没有对应的 Pages Function`).toContain(call.url);
     }
+    for (const literal of apiLiterals(source)) {
+      expect(routes, `D1 适配器引用了 ${literal}，但部署里没有这个 Function`).toContain(literal);
+    }
   });
 
   it('共享的 ServerEditorAuth 请求的每个 URL 都真实存在', () => {
@@ -54,7 +74,12 @@ describe('部署路由与浏览器适配器一致', () => {
     for (const call of calls) {
       expect(routes, `${call.method} ${call.url} 没有对应的 Pages Function`).toContain(call.url);
     }
-    expect(calls.map((call) => call.url).sort()).toEqual(['/api/logout', '/api/session']);
+    expect(calls.map((call) => call.url).sort()).toEqual(['/api/login', '/api/logout', '/api/session']);
+    // Beyond the exact list above: this is the half of the check that survives a
+    // URL being routed through a variable. Without it, a reintroduced
+    // `/api/setup` fallback would pass by being invisible rather than by being
+    // right.
+    expect(apiLiterals(source).sort(), '客户端引用了精确列表之外的 API 路径').toEqual(calls.map((call) => call.url).sort());
   });
 
   it('functions/schema.sql 真正建出了代码依赖的表', () => {

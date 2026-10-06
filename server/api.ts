@@ -34,24 +34,24 @@ export function createApi(store: SqliteStore, now: () => number = () => Date.now
         try { const value: unknown = JSON.parse(raw); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(); return value as Record<string, unknown>; }
         catch { throw new ApiError('validation-failed', '请求不是有效 JSON'); }
       };
-      if (path === '/api/health' && request.method === 'GET') return json({ storage: 'sqlite', empty: store.load().empty, configured: Boolean(store.credentials()) });
-      if (path === '/api/session' && request.method === 'GET') return json({ loggedIn, until: loggedIn ? until : 0, configured: Boolean(store.credentials()) });
+      // Neither public response says whether an owner is configured. That field
+      // used to be here for a client branch that no longer exists, and leaving
+      // it would turn these two anonymous GETs into a probe for "does this
+      // deployment have an administrator" — on this backend only, since the
+      // Worker deliberately withholds the same fact.
+      if (path === '/api/health' && request.method === 'GET') return json({ storage: 'sqlite', empty: store.load().empty });
+      if (path === '/api/session' && request.method === 'GET') return json({ loggedIn, until: loggedIn ? until : 0 });
       if (path === '/api/logout' && request.method === 'POST') { sessions.delete(token); return json({ loggedIn: false }, 200, { 'Set-Cookie': cookie('', 0) }); }
-      if ((path === '/api/setup' || path === '/api/login') && request.method === 'POST') {
+      if (path === '/api/login' && request.method === 'POST') {
         const data = await body();
         if (typeof data.username !== 'string' || typeof data.password !== 'string' || !data.username.trim() || data.username.length > 100 || data.password.length < 10 || data.password.length > 1024)
           throw new ApiError('validation-failed', '请填写账号和至少 10 字符的密码');
         if (now() - attemptWindow > 60_000) { attempts = 0; attemptWindow = now(); }
         if (++attempts > 10) throw new ApiError('unauthorized', '尝试次数过多，请一分钟后重试', 429);
-        if (path === '/api/setup') {
-          const salt = randomBytes(16).toString('hex');
-          store.setup(data.username.trim(), salt, scryptSync(data.password, salt, 64).toString('hex'));
-        } else {
-          const auth = store.credentials();
-          const candidate = scryptSync(data.password, auth?.salt ?? 'unconfigured', 64);
-          if (!auth || auth.username !== data.username.trim() || !timingSafeEqual(candidate, Buffer.from(auth.hash, 'hex')))
-            throw new ApiError('unauthorized', '账号或密码错误', 401);
-        }
+        const auth = store.credentials();
+        const candidate = scryptSync(data.password, auth?.salt ?? 'unconfigured', 64);
+        if (!auth || auth.username !== data.username.trim() || !timingSafeEqual(candidate, Buffer.from(auth.hash, 'hex')))
+          throw new ApiError('unauthorized', '账号或密码错误', 401);
         attempts = 0;
         const nextToken = randomBytes(32).toString('hex'); const nextUntil = now() + 30 * 60_000;
         sessions.delete(token); sessions.set(nextToken, nextUntil);

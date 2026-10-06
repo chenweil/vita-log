@@ -10,6 +10,7 @@
     "build:pages": "VITE_BASE=/vita-log/ npm run build",
     "preview": "vite preview",
     "sqlite": "tsx server/cli.ts",
+    "owner": "tsx server/owner-cli.ts",
     "sqlite:server": "npm run build && tsx server/main.ts",
     "verify:release": "npm run build && node scripts/verify-release.mjs",
     "typecheck": "tsc --noEmit",

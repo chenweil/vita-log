@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { randomBytes, scryptSync } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createEmptySnapshot } from '../src/domain';
@@ -7,6 +8,12 @@ import { createApi } from '../server/api';
 import { SqliteStore } from '../server/store';
 
 function setup() { const root = mkdtempSync(join(tmpdir(), 'vita-api-')); const store = new SqliteStore({ database: join(root, 'data.sqlite'), backups: join(root, 'backups') }); return { root, store, api: createApi(store, () => 1_000_000) }; }
+/** Provision the owner offline, the way `npm run owner` does, then log in. There is no setup route to lean on any more. */
+async function ownerSession(api: ReturnType<typeof createApi>, store: SqliteStore, username: string, password: string) {
+  const salt = randomBytes(16).toString('hex');
+  store.setOwnerCredentials(username, salt, scryptSync(password, salt, 64).toString('hex'));
+  return api(new Request('http://127.0.0.1/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password }) }));
+}
 async function request(api: ReturnType<typeof createApi>, path: string, init?: RequestInit) { return api(new Request(`http://127.0.0.1${path}`, init)); }
 async function requestFrom(api: ReturnType<typeof createApi>, origin: string, path: string, init?: RequestInit) { return api(new Request(`${origin}${path}`, init)); }
 
@@ -16,9 +23,9 @@ describe('SQLite API boundary', () => {
     try {
       const denied = await request(api, '/api/snapshot', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ snapshot: createEmptySnapshot(), expectedVersion: 0 }) });
       expect(denied.status).toBe(401);
-      const setupResponse = await request(api, '/api/setup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: 'long-enough-password' }) });
-      expect(setupResponse.status).toBe(200);
-      const cookie = setupResponse.headers.get('set-cookie');
+      const login = await ownerSession(api, store, 'owner', 'long-enough-password');
+      expect(login.status).toBe(200);
+      const cookie = login.headers.get('set-cookie');
       const stale = await request(api, '/api/snapshot', { method: 'PUT', headers: { 'content-type': 'application/json', cookie: cookie ?? '' }, body: JSON.stringify({ snapshot: createEmptySnapshot(), expectedVersion: 99 }) });
       expect(stale.status).toBe(409);
       const backup = await request(api, '/api/backups', { method: 'POST', headers: { cookie: cookie ?? '' } });

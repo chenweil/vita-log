@@ -38,6 +38,11 @@ jobs:
         env:
           VITE_BASE: /${{ github.event.repository.name }}/
 
+      - name: 发布检查（含产物凭据扫描）
+        # 直接调脚本而不是 `npm run verify:release`：后者会重新构建一遍，而
+        # 那次构建没有 VITE_BASE，扫到的不是本次要部署的产物。
+        run: node scripts/verify-release.mjs
+
       - name: 确认未把真实健康数据打进产物
         run: |
           # 只检测真实历史数据中独有的具体食物名。

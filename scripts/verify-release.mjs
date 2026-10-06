@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, extname, join, relative, resolve, sep } from 'node:path';
+import { findCredentialMaterial } from './credential-scan.mjs';
 
 const distDirectory = resolve(process.argv[2] ?? 'dist');
 
@@ -75,9 +76,14 @@ async function main() {
   const index = await readFile(indexPath, 'utf8');
   if (index.includes('/src/main.ts')) fail('生产入口仍指向 TypeScript 源文件');
 
+  // vite emits "./assets/…" for a root build and "/<repo>/assets/…" for the
+  // Pages sub-path build. Both name the assets directory they point into, so
+  // resolve against the part after it — otherwise this gate only ever validates
+  // a local root build and silently refuses the artifact CI actually deploys.
   const references = [...index.matchAll(/(?:src|href)="([^"]+)"/g)]
     .map((match) => match[1])
-    .filter((value) => value.startsWith('./'));
+    .filter((value) => value.includes('/assets/'))
+    .map((value) => value.slice(value.indexOf('/assets/') + 1));
   if (references.length === 0) fail('index.html 没有引用构建后的静态资源');
   for (const reference of references) await requireFile(resolve(distDirectory, reference), reference);
 
@@ -88,6 +94,12 @@ async function main() {
   for (const forbidden of forbiddenRuntimeGlobals) {
     if (runtime.includes(forbidden)) fail(`运行产物包含废弃的 Workbuddy 全局入口：${forbidden}`);
   }
+
+  // The bundle is public. Anything shaped like editor credential material in it
+  // would ship a password hash, a salt or a retired account to every visitor,
+  // and a bundle is exactly where such a constant hides unnoticed.
+  const found = findCredentialMaterial(runtime, { minified: true });
+  if (found) fail(`运行产物包含疑似编辑凭据（${found}）`);
 
   const { server, origin } = await serve(distDirectory);
   try {

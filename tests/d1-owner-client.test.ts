@@ -103,7 +103,7 @@ describe('Cloudflare 模式的编辑会话客户端', () => {
     // endpoint returns — it has no setup concept to report.
     client.responses.push(Response.json({ loggedIn: false, until: 0, version: 0 }));
     client.responses.push(Response.json({ loggedIn: true, until: 60_000 }));
-    const auth = new ServerEditorAuth(client, () => 1_000, { allowSetup: false });
+    const auth = new ServerEditorAuth(client, () => 1_000);
     expect(await auth.unlock('owner', 'a long owner password')).toBe(true);
     expect(auth.isUnlocked()).toBe(true);
     expect(client.calls.map(call => call.input)).toEqual(['/api/session', '/api/login']);
@@ -113,7 +113,7 @@ describe('Cloudflare 模式的编辑会话客户端', () => {
     const client = new FakeClient();
     client.responses.push(Response.json({ loggedIn: true, until: 60_000 }));
     client.responses.push(Response.json({ loggedIn: false }));
-    const auth = new ServerEditorAuth(client, () => 1_000, { allowSetup: false });
+    const auth = new ServerEditorAuth(client, () => 1_000);
     await auth.unlock('owner', 'a long owner password');
     expect(auth.isUnlocked()).toBe(true);
     await auth.lock();
@@ -145,7 +145,7 @@ describe('Cloudflare 模式的编辑会话客户端', () => {
    * not land" rather than "a client that was never logged in".
    */
   const assertStillUnlocked = async (client: FakeClient, breakLock: () => void): Promise<void> => {
-    const auth = new ServerEditorAuth(client, () => 1_000, { allowSetup: false });
+    const auth = new ServerEditorAuth(client, () => 1_000);
     expect(await auth.unlock('owner', 'a long owner password')).toBe(true);
     expect(auth.isUnlocked()).toBe(true);
     breakLock();
@@ -159,7 +159,7 @@ describe('Cloudflare 模式的编辑会话客户端', () => {
   it('会话已存在时不重复登录', async () => {
     const client = new FakeClient();
     client.responses.push(Response.json({ loggedIn: true, until: 60_000, version: 4 }));
-    const auth = new ServerEditorAuth(client, () => 1_000, { allowSetup: false });
+    const auth = new ServerEditorAuth(client, () => 1_000);
     expect(await auth.unlock('owner', 'a long owner password')).toBe(true);
     expect(client.calls).toHaveLength(1);
   });
@@ -168,17 +168,20 @@ describe('Cloudflare 模式的编辑会话客户端', () => {
     const client = new FakeClient();
     client.responses.push(Response.json({ loggedIn: false, until: 0, version: 0 }));
     client.responses.push(failWith('unauthorized', '账号或密码错误', 401));
-    const auth = new ServerEditorAuth(client, () => 1_000, { allowSetup: false });
+    const auth = new ServerEditorAuth(client, () => 1_000);
     expect(await auth.unlock('owner', 'wrong')).toBe(false);
     expect(auth.isUnlocked()).toBe(false);
   });
 
-  it('自托管模式仍保留 setup 回退，未改动既有行为', async () => {
+  it('会话响应缺少 configured 字段也不会回落到 setup', async () => {
+    // The Cloudflare session endpoint has no setup concept to report. A client
+    // that branched on `configured` would treat its absence as "not set up yet"
+    // and reach for a route that must not exist. There is no such branch now.
     const client = new FakeClient();
-    client.responses.push(Response.json({ configured: false, loggedIn: false, until: 0 }));
-    client.responses.push(Response.json({ until: 60_000 }));
+    client.responses.push(Response.json({ loggedIn: false, until: 0, version: 0 }));
+    client.responses.push(Response.json({ loggedIn: true, until: 60_000 }));
     const auth = new ServerEditorAuth(client, () => 1_000);
     expect(await auth.unlock('owner', 'a long owner password')).toBe(true);
-    expect(client.calls[1]?.input).toBe('/api/setup');
+    expect(client.calls.map((call) => call.input)).toEqual(['/api/session', '/api/login']);
   });
 });

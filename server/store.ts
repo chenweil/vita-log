@@ -66,6 +66,21 @@ export class SqliteStore {
     try { this.db.prepare('INSERT INTO auth(id,username,salt,hash) VALUES(1,?,?,?)').run(username, salt, hash); }
     catch { throw new ApiError('migration-conflict', '本人账号已经设置', 409); }
   }
+  /**
+   * Provision or rotate the owner account. Ops-only.
+   *
+   * `setup` above refuses a second account on purpose, so the one-time bootstrap
+   * cannot be replayed. Rotation is a different act with a different
+   * authorization — it has to be something the owner runs deliberately — so it
+   * gets its own method rather than weakening `setup`. Nothing in the request
+   * path calls this: the API has no route that could.
+   */
+  setOwnerCredentials(username: string, salt: string, hash: string): void {
+    this.db.prepare('UPDATE auth SET username=?, salt=?, hash=? WHERE id=1').run(username, salt, hash);
+    const updated = this.db.prepare('SELECT COUNT(*) AS count FROM auth WHERE id=1').get() as { count?: number };
+    if (Number(updated?.count ?? 0) === 1) return;
+    this.db.prepare('INSERT INTO auth(id,username,salt,hash) VALUES(1,?,?,?)').run(username, salt, hash);
+  }
   commit(value: unknown, expectedVersion: number, destructive = false, migration = false): StoredSnapshot {
     let snapshot: HealthSnapshot;
     try { snapshot = normalizeSnapshot(value); } catch { throw new ApiError('validation-failed', '健康快照校验失败'); }
