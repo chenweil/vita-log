@@ -4,7 +4,6 @@ import {
   HealthStateVersionConflict,
   normalizeHealthSnapshot,
   prepareVersionedState,
-  readStoredHealthState,
   type CommittedHealthState,
   type D1DatabaseLike,
 } from './d1-store';
@@ -202,23 +201,27 @@ export async function previewMigration(
  * be confirmed is not an import the owner can rely on, and the public read path
  * is already serving this row by then.
  *
- * The candidate is staged in `health_state_import`, reconciled there, and only
- * then promoted into `health_state` in one guarded statement. Staging is what
- * makes the contract below true rather than aspirational:
+ * The commit boundary is the promotion into `health_state`. Everything that must
+ * be checked is checked before it, and nothing after it is allowed to raise:
  *
- * - Every failure *before* the promotion — an invalid snapshot, a staging write
- *   that will not go in, a reconciliation mismatch, a stale preview, a database
- *   that cannot be reached — leaves the online snapshot exactly as it was. Since
- *   `health_state` is still empty, the public read path keeps answering
- *   "not imported yet" and a retry works normally. ADR-0002 requires that public
- *   read stays closed until reconciliation and backup are done, and reconciling
- *   bytes that were already being served could not satisfy that.
- * - The only failure that can land after the promotion is the final
- *   confirmation, whose window is a single read of a row this statement just
- *   wrote. Nothing rolls that row back: deleting the owner's only copy of their
- *   health data on a failed comparison would be the more destructive outcome, so
- *   the error says plainly that the data is live and to be read rather than
- *   re-imported.
+ * - **Before** — normalize the payload, write the staged candidate, reconcile it
+ *   byte-for-byte. Any failure here leaves the online snapshot exactly as it
+ *   was; since `health_state` is still empty, the public read path keeps
+ *   answering "not imported yet" and a retry works normally. This is what
+ *   satisfies ADR-0002's "no public read until reconciliation and backup are
+ *   done": reconciling bytes that were already being served could not.
+ * - **The promotion itself** — one guarded statement that both checks D1 is
+ *   empty and creates the row. A lost race or an unreported change count is the
+ *   last thing that can fail, and it fails with nothing written.
+ * - **After** — clearing the staging table, which is bounded scratch space and is
+ *   never read, so its failure cannot invalidate a completed import and is not
+ *   allowed to report one.
+ *
+ * The consequence is the property this ticket promises, and it is exact rather
+ * than approximate: **every error this function returns is raised before the
+ * live row exists.** A caller that receives a non-2xx from a migration can rely
+ * on the current D1 snapshot being untouched, and there is no partial-import
+ * state for a retry to trip over.
  */
 export async function commitMigration(
   db: D1DatabaseLike | undefined,
@@ -247,12 +250,14 @@ export async function commitMigration(
   // 2. Reconcile the staged bytes against what was sent. Until this passes, the
   //    online snapshot is still untouched — which is what keeps a failed import
   //    from changing the current D1 state and from opening public read on data
-  //    nobody has confirmed.
-  await reconcileMigration(db, prepared, 'staged');
+  //    nobody has confirmed. The summary returned to the owner is derived here,
+  //    from the same bytes the promotion below carries into `health_state`.
+  const reconciled = await reconcileMigration(db, prepared);
 
-  // 3. Promote. The empty-database guard lives inside this INSERT, so the check
-  //    and the write are one statement and a concurrent first import cannot both
-  //    report success.
+  // 3. Promote — the commit point. Everything that must be checked has been
+  //    checked; nothing after this line may raise. The empty-database guard lives
+  //    inside the INSERT, so the check and the write are one statement and a
+  //    concurrent first import cannot both report success.
   let changes: number | undefined;
   try {
     const result = await db.prepare(MIGRATION_INSERT).bind(prepared.payload, prepared.version, prepared.savedAt).run();
@@ -267,29 +272,43 @@ export async function commitMigration(
   // is online when it may not be.
   if (changes === undefined) throw new D1UnavailableError('D1 未返回迁移结果');
 
-  // 4. Confirm the promoted row, then clear the staging table. The summary the
-  //    owner is shown is recomputed from D1's own bytes, never from the request.
-  const promoted = await reconcileMigration(db, prepared, 'promoted');
+  // Past the commit point. The import has succeeded; the rest is housekeeping
+  // and is deliberately not allowed to turn a success into a failure.
   await clearStaging(db);
-  return { version: promoted.version, savedAt: promoted.savedAt, summary: promoted.summary };
+  return { version: reconciled.version, savedAt: reconciled.savedAt, summary: reconciled.summary };
 }
 
-/** Drop the staged candidate once it has been promoted. */
+/**
+ * Drop the staged candidate once it has been promoted.
+ *
+ * Best-effort, and a failure here is swallowed. This runs *after* the commit
+ * point, where the data is already live and correct; reporting an error would
+ * tell the owner a completed import failed and send them into a retry that the
+ * empty-database guard then refuses — a dead end manufactured from a cosmetic
+ * problem.
+ *
+ * Swallowing it is safe because the scratch row is bounded: `health_state_import`
+ * is `id = 1` with a CHECK constraint and is only ever written with
+ * `INSERT OR REPLACE`, so a stale candidate can neither accumulate nor be read
+ * by anything. It is overwritten by the next attempt.
+ */
 async function clearStaging(db: D1DatabaseLike): Promise<void> {
   try {
     await db.prepare(MIGRATION_STAGE_CLEAR).run();
-  } catch (error) {
-    throw new D1UnavailableError('D1 迁移完成，但清理暂存数据失败', { cause: error });
+  } catch {
+    // Nothing to do: see above. The migration itself has already committed.
   }
 }
 
 /**
- * Read a row back, prove it is what was sent, and report what is stored.
+ * Read the staged row back, prove it is what was sent, and report what it holds.
  *
- * Called twice: once against the staged candidate, before anything is promoted,
- * and once against the promoted row, so the promotion itself is confirmed rather
- * than assumed. The same comparison serves both because both rows are written
- * from the same `prepared` bytes.
+ * This runs only against the staged candidate, before anything is promoted. That
+ * placement is the point: a check that runs *after* the commit can only report a
+ * failure the operator cannot act on — the data is already live, and deleting it
+ * would throw away the owner's only copy. Checking the staged bytes first means
+ * the question "is this the data we intended?" is settled while the answer is
+ * still changeable.
  *
  * Three things are checked, each answering a different way the import could be
  * wrong while still reporting success:
@@ -303,36 +322,25 @@ async function clearStaging(db: D1DatabaseLike): Promise<void> {
  *   nobody else has touched.
  * - the stored payload still normalizes, so the public read path can serve it.
  *
- * `scope` only changes what the failure says, never what is checked. Before the
- * promotion the online snapshot is still empty, so the owner can simply retry;
- * after it, the data is live and must not be deleted on a failed comparison.
+ * The summary is derived from the stored bytes, not from the caller's snapshot,
+ * so the counts the owner is shown describe what will go live.
  */
 async function reconcileMigration(
   db: D1DatabaseLike,
   prepared: { payload: string; savedAt: string; version: number },
-  scope: 'staged' | 'promoted' = 'staged',
 ): Promise<{ version: number; savedAt: string; summary: MigrationSummary }> {
-  const outcome = scope === 'staged'
-    ? 'D1 尚未导入数据，可直接重试迁移'
-    : '数据已写入 D1 并对外提供，请先查看当前数据再决定下一步';
+  // Nothing is live yet, so a failure here leaves the owner free to simply retry.
   const fail = (detail: string): D1UnavailableError =>
-    new D1UnavailableError(`D1 迁移对账失败：${detail}。${outcome}`);
+    new D1UnavailableError(`D1 迁移对账失败：${detail}。D1 尚未导入数据，可直接重试迁移`);
 
   let stored: { payload: string; version: number; savedAt: string } | null;
   try {
-    // The staged row is read with its own columns and mapped here, so both
-    // sources hand the checks one shape instead of each comparison having to
-    // know which query produced its row.
-    if (scope === 'staged') {
-      const row = await db.prepare(MIGRATION_STAGE_QUERY).bind(1).first<Record<string, unknown>>();
-      stored = row
-        ? { payload: String(row.payload), version: Number(row.version), savedAt: String(row.saved_at) }
-        : null;
-    } else {
-      stored = await readStoredHealthState(db);
-    }
+    const row = await db.prepare(MIGRATION_STAGE_QUERY).bind(1).first<Record<string, unknown>>();
+    stored = row
+      ? { payload: String(row.payload), version: Number(row.version), savedAt: String(row.saved_at) }
+      : null;
   } catch (error) {
-    throw fail('无法读回导入结果');
+    throw fail('无法读回暂存结果');
   }
   if (!stored) throw fail('读回结果为空');
 

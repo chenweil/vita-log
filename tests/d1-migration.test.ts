@@ -656,7 +656,111 @@ describe('确认与原子性', () => {
     db.close();
   });
 
-  it('预览与导入走同一个摘要函数，预览看到的数量就是导入后的数量', async () => {
+  it('提交点之后的失败不得把已完成的迁移报成失败', async () => {
+  // Two post-commit hazards, and both used to produce the worst possible answer:
+  // a 503 telling the owner the import failed while their data was in fact live,
+  // and a retry then refused with 409. Nothing after the promotion may raise.
+  for (const mode of ['readback', 'cleanup'] as const) {
+    const db = new SqliteD1();
+    const cookie = await login(db);
+    const realPrepare = db.prepare.bind(db);
+    let promoted = false;
+    db.prepare = (query: string) => {
+      const statement = realPrepare(query);
+      const isPromotion = /INSERT INTO health_state \(/.test(query);
+      // The failure has to survive both call shapes — a statement's `first` can
+      // be reached directly or through the object `bind` returns, and a probe
+      // that only patched one would let a post-commit read slip past. It must
+      // also arm *after* the promotion, so the pre-commit staged reconciliation
+      // still runs and the import reaches the commit point at all.
+      const arm = (): void => { if (isPromotion) promoted = true; };
+      const guard = (): void => { if (mode === 'readback' && promoted) throw new Error('D1 read failed'); };
+      const first = async <T = Record<string, unknown>>(): Promise<T | null> => {
+        guard();
+        return statement.first<T>();
+      };
+      const run = async (): Promise<{ meta: { changes?: number } }> => {
+        if (mode === 'cleanup' && /DELETE FROM health_state_import/.test(query)) throw new Error('D1 delete failed');
+        const result = await statement.run();
+        arm();
+        return result;
+      };
+      return {
+        bind: (...values: unknown[]) => {
+          const bound = statement.bind(...values);
+          return {
+            ...bound,
+            run: async () => {
+              if (mode === 'cleanup' && /DELETE FROM health_state_import/.test(query)) throw new Error('D1 delete failed');
+              const result = await bound.run();
+              arm();
+              return result;
+            },
+            first: async <T = Record<string, unknown>>(): Promise<T | null> => {
+              guard();
+              return bound.first<T>();
+            },
+          };
+        },
+        first,
+        run,
+      };
+    };
+
+    const response = await migrate(db, sampleSnapshot(), cookie);
+    expect(response.status, `${mode} 失败不得把已提交的迁移报成 503`).toBe(200);
+    // The data really is live and committed.
+    expect(db.storedVersion()).toBe(1);
+    expect(JSON.parse(db.db.prepare('SELECT payload FROM health_state WHERE id=1').get()!.payload as string).settings.name).toBe('陈威龙');
+    // In `readback` mode the probe is deliberately indiscriminate and takes the
+    // public read down with it, so only the cleanup case can be checked end to
+    // end here; either way the migration itself must have reported success.
+    if (mode === 'cleanup') {
+      const read = await onSnapshotRequest({ request: new Request(`${ORIGIN}/api/snapshot`), env: ownerEnv({ VITA_LOG_DB: db }) });
+      expect(read.status).toBe(200);
+      expect((await read.json() as { settings: { name: string } }).settings.name).toBe('陈威龙');
+    }
+    db.close();
+  }
+});
+
+it('迁移返回错误时，D1 当前快照必然未被改动', async () => {
+  // The ticket's promise, checked as a property rather than case by case: for
+  // every way the migration can fail, the online snapshot is untouched and no
+  // half-imported state is left for a retry to trip over.
+  const invalid = { app: 'vita-log', schemaVersion: 1, settings: {} };
+
+  const db1 = new SqliteD1();
+  expect((await post('migrate', db1, { snapshot: invalid, expectedVersion: 0 }, await login(db1))).status).toBe(400);
+  expect(await isD1Empty(db1)).toBe(true);
+
+  const db2 = seededD1();
+  const before = db2.db.prepare('SELECT payload, version, saved_at FROM health_state WHERE id=1').get();
+  expect((await migrate(db2, sampleSnapshot(), await login(db2), 0)).status).toBe(409);
+  expect(db2.db.prepare('SELECT payload, version, saved_at FROM health_state WHERE id=1').get()).toEqual(before);
+
+  const db3 = new SqliteD1();
+  expect((await migrate(db3, sampleSnapshot(), await login(db3), 5)).status).toBe(409);
+  expect(await isD1Empty(db3)).toBe(true);
+
+  const db4 = new SqliteD1({ failOn: /INSERT INTO health_state/ });
+  expect((await migrate(db4, sampleSnapshot(), await login(db4))).status).toBe(503);
+  expect(await isD1Empty(db4)).toBe(true);
+
+  const db5 = new SqliteD1({ failOn: /INSERT OR REPLACE INTO health_state_import/ });
+  expect((await migrate(db5, sampleSnapshot(), await login(db5))).status).toBe(503);
+  expect(await isD1Empty(db5)).toBe(true);
+
+  // A reconciliation mismatch is a failure too, and the online row is still empty.
+  const db6 = new SqliteD1();
+  corruptStaging(db6, () => JSON.stringify(createEmptySnapshot()));
+  expect((await migrate(db6, sampleSnapshot(), await login(db6))).status).toBe(503);
+  expect(await isD1Empty(db6)).toBe(true);
+
+  for (const db of [db1, db2, db3, db4, db5, db6]) db.close();
+});
+
+it('预览与导入走同一个摘要函数，预览看到的数量就是导入后的数量', async () => {
     const db = new SqliteD1();
     const cookie = await login(db);
     const snapshot = sampleSnapshot();
