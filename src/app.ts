@@ -413,8 +413,15 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
   const bindEvents = (): void => {
     bindReload(container, load);
     container.querySelectorAll<HTMLElement>('[data-action="auth-toggle"]').forEach((button) => button.addEventListener('click', () => {
-      if (canEdit()) { auth.lock(); editing = false; formState = emptyForm(); render(); }
-      else { authOpen = true; render(); }
+      // Awaited on purpose: the server has to confirm the revocation before the
+      // page hides its controls. Closing the editor on a failed logout would
+      // claim the owner is locked while their session is still usable.
+      if (canEdit()) {
+        void auth.lock().then(() => {
+          if (!auth.isUnlocked()) { editing = false; formState = emptyForm(); }
+          render();
+        });
+      } else { authOpen = true; render(); }
     }));
     container.querySelectorAll<HTMLElement>('[data-action="close-auth"]').forEach((button) => button.addEventListener('click', () => { authOpen = false; render(); }));
     container.querySelectorAll<HTMLFormElement>('#authForm').forEach((form) => form.addEventListener('submit', async (event) => {

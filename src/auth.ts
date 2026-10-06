@@ -1,7 +1,7 @@
 export interface EditorAuth {
   isUnlocked(): boolean;
   unlock(username: string, password: string): Promise<boolean>;
-  lock(): void;
+  lock(): Promise<void>;
 }
 
 /**
@@ -17,5 +17,5 @@ export interface EditorAuth {
 export class ReadOnlyEditorAuth implements EditorAuth {
   isUnlocked(): boolean { return false; }
   async unlock(_username: string, _password: string): Promise<boolean> { return false; }
-  lock(): void {}
+  async lock(): Promise<void> {}
 }

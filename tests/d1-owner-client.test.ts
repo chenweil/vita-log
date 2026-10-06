@@ -109,17 +109,52 @@ describe('Cloudflare 模式的编辑会话客户端', () => {
     expect(client.calls.map(call => call.input)).toEqual(['/api/session', '/api/login']);
   });
 
-  it('锁定调用注销并立即变为只读', async () => {
+  it('锁定调用注销并在服务端确认后变为只读', async () => {
     const client = new FakeClient();
     client.responses.push(Response.json({ loggedIn: true, until: 60_000 }));
     client.responses.push(Response.json({ loggedIn: false }));
     const auth = new ServerEditorAuth(client, () => 1_000, { allowSetup: false });
     await auth.unlock('owner', 'a long owner password');
     expect(auth.isUnlocked()).toBe(true);
-    auth.lock();
+    await auth.lock();
     expect(auth.isUnlocked()).toBe(false);
     expect(client.calls.at(-1)?.input).toBe('/api/logout');
   });
+
+  it('注销失败时不谎报已锁定', async () => {
+    // The cookie outlives this call. If the revocation never lands, the session
+    // is still usable for the rest of its TTL, and a page that has already
+    // hidden its controls would be telling the owner they are safe when they
+    // are not. Staying unlocked is the honest outcome.
+    // Two ways it can fail to land: the server answers with an error, or the
+    // request never completes at all.
+    const refused = new FakeClient();
+    refused.responses.push(Response.json({ loggedIn: true, until: 60_000, version: 3 }));
+    await assertStillUnlocked(refused, () => {
+      refused.responses.push(failWith('database-unavailable', '健康数据服务暂时不可用，请稍后重试', 503));
+    });
+
+    const offline = new FakeClient();
+    offline.responses.push(Response.json({ loggedIn: true, until: 60_000, version: 3 }));
+    await assertStillUnlocked(offline, () => offline.failNext());
+  });
+
+  /**
+   * Unlock first, then break only the lock. The failure is introduced after the
+   * session exists, so the case really is "a live session whose revocation did
+   * not land" rather than "a client that was never logged in".
+   */
+  const assertStillUnlocked = async (client: FakeClient, breakLock: () => void): Promise<void> => {
+    const auth = new ServerEditorAuth(client, () => 1_000, { allowSetup: false });
+    expect(await auth.unlock('owner', 'a long owner password')).toBe(true);
+    expect(auth.isUnlocked()).toBe(true);
+    breakLock();
+    // Never rejects, so a caller that fires and forgets cannot produce an
+    // unhandled rejection.
+    await expect(auth.lock()).resolves.toBeUndefined();
+    expect(auth.isUnlocked()).toBe(true);
+    expect(client.calls.at(-1)?.input).toBe('/api/logout');
+  };
 
   it('会话已存在时不重复登录', async () => {
     const client = new FakeClient();

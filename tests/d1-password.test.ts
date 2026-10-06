@@ -1,3 +1,4 @@
+import { pbkdf2Sync } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -107,6 +108,45 @@ describe('PBKDF2 密码原语', () => {
       expect(await verifyPassword('a valid password', value as string), String(value)).toBe(false);
       expect(await verifyPassword('', value as string), String(value)).toBe(false);
     }
+  });
+
+  it('与独立实现逐字节一致：摘要不是「看起来像 SHA-256」而是真正的 PBKDF2', async () => {
+    // Every other case here proves self-consistency: the right password matches
+    // and the wrong one does not. That would still hold if `derivePassword` were
+    // some deterministic non-KDF — a plain hash, or even `password.length`.
+    // Cross-checking against node:crypto anchors the actual bytes to an
+    // implementation this code does not share, so a change of algorithm, hash
+    // or encoding shows up as a byte difference rather than as a silent change
+    // of what a stored credential means.
+    for (const [password, saltHex, iterations] of [
+      ['a long owner password', '000102030405060708090a0b0c0d0e0f', 210_000],
+      ['a long owner password', '000102030405060708090a0b0c0d0e0f', 210_001],
+      ['short', 'ff', 210_000],
+      ['\u00e4\u00f6\u00fc \u4e2d\u6587 \u5bc6\u7801', 'a0b1c2d3', 210_000],
+      ['', '00', 210_000],
+    ] as const) {
+      const salt = Uint8Array.from(saltHex.match(/../g)!.map((byte) => Number.parseInt(byte, 16)));
+      const expected = Buffer.from(pbkdf2Sync(password, salt, iterations, 32, 'sha256')).toString('hex');
+      const actual = Buffer.from(await derivePassword(password, salt, iterations)).toString('hex');
+      expect(actual, `${password} @ ${iterations}`).toBe(expected);
+    }
+  });
+
+  it('常量时间比较会检查每一个字节，而不是在首个差异处返回', async () => {
+    // A digest that differs only in its first byte and one that differs only in
+    // its last must both be rejected. An implementation that returned as soon as
+    // it found a mismatch would accept the second one only by accident of
+    // ordering, so the last-byte case is what actually pins "no early exit".
+    const credential = parseCredential(await createCredential('compare every byte', fixedRandom(0x99)))!;
+    const baseline = Buffer.from(await derivePassword('compare every byte', credential.salt, credential.iterations));
+
+    for (const index of [0, Math.floor(baseline.length / 2), baseline.length - 1]) {
+      const tweaked = Uint8Array.from(baseline);
+      tweaked[index] = tweaked[index]! ^ 0x01;
+      expect(await verifyPassword('compare every byte', { ...credential, digest: tweaked }), `byte ${index}`).toBe(false);
+    }
+    // A length mismatch is rejected too, rather than comparing a prefix.
+    expect(await verifyPassword('compare every byte', { ...credential, digest: credential.digest.slice(1) })).toBe(false);
   });
 
   it('不依赖 Node crypto：模块不引入 node:crypto，也不调用 scryptSync', () => {

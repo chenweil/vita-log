@@ -37,5 +37,26 @@ export class ServerEditorAuth implements EditorAuth {
       return true;
     } catch { return false; }
   }
-  lock(): void { this.unlockedUntil = 0; void this.client.fetch('/api/logout', { method: 'POST', credentials: 'same-origin' }); }
+
+  /**
+   * Lock, and only claim it once the server agrees.
+   *
+   * The revocation is awaited and its status checked, because the cookie outlives
+   * this call: if the request fails, the server-side session is still live for
+   * the rest of its 30 minutes, and a page that had already hidden its controls
+   * would be telling the owner they are safe when they are not. So the local
+   * unlock is cleared on confirmation and left alone otherwise — an honest
+   * "still unlocked" beats a locked-looking page with a live session.
+   *
+   * This never rejects, so a caller that fires and forgets cannot produce an
+   * unhandled rejection. Surfacing the failure to the owner is UI work, which
+   * 06.1-04 owns.
+   */
+  async lock(): Promise<void> {
+    try {
+      const response = await this.client.fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+      if (!response.ok) return;
+      this.unlockedUntil = 0;
+    } catch { /* the session is still live, so the page must not pretend otherwise */ }
+  }
 }

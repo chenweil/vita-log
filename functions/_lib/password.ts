@@ -1,3 +1,5 @@
+import { fromHex, toHex } from './hex';
+
 /**
  * Owner password verification for the Pages Functions runtime.
  *
@@ -128,13 +130,3 @@ function constantTimeEqual(left: Uint8Array, right: Uint8Array): boolean {
   return difference === 0;
 }
 
-function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function fromHex(value: string): Uint8Array | null {
-  if (!/^[0-9a-f]*$/.test(value) || value.length % 2 !== 0) return null;
-  const bytes = new Uint8Array(value.length / 2);
-  for (let index = 0; index < bytes.length; index += 1) bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
-  return bytes;
-}

@@ -1,9 +1,8 @@
 import { createPublicSnapshot } from '../../src/public-snapshot';
 import {
-  commitHealthState, D1NotInitializedError, D1UnavailableError, HealthStateVersionConflict,
-  readHealthState, readHealthStateVersion, type D1DatabaseLike,
+  commitHealthState, D1NotInitializedError, D1UnavailableError, HealthStateVersionConflict, readHealthState,
 } from '../_lib/d1-store';
-import { ApiError, readJsonBody, requireSameOrigin, unauthorized, versionConflict, type FunctionContext } from '../_lib/api';
+import { ApiError, noStore, readJsonBody, requireSameOrigin, unauthorized, versionConflict, type FunctionContext } from '../_lib/api';
 import { addressKey, clientIp, consume, sessionKey, WRITE_ATTEMPTS } from '../_lib/rate-limit';
 import { readSessionToken, resolveSession, SessionStoreError } from '../_lib/session';
 
@@ -15,13 +14,6 @@ const now = (): number => Date.now();
 /** One wording for the write limiter, so it never reveals which key tripped. */
 const TOO_MANY_WRITES = '保存过于频繁，请稍后重试';
 
-/** Health responses are never cached: "refresh shows the latest save" depends on it. */
-const respond = (body: unknown, status: number, headers: Record<string, string> = {}): Response =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers },
-  });
-
 /**
  * Anonymous public read. No credential is consulted, so a visitor always gets
  * the current saved dashboard, and every failure mode resolves to one stable
@@ -29,14 +21,14 @@ const respond = (body: unknown, status: number, headers: Record<string, string> 
  */
 export async function handlePublicSnapshot(context: SnapshotContext): Promise<Response> {
   try {
-    return respond(createPublicSnapshot(await readHealthState(context.env.VITA_LOG_DB)), 200);
+    return noStore(createPublicSnapshot(await readHealthState(context.env.VITA_LOG_DB)), 200);
   } catch (error) {
     // An empty D1 keeps its own wording so the owner can tell "not imported
     // yet" apart from an outage; both stay 503 so neither reads as empty data.
     if (error instanceof D1NotInitializedError) {
-      return respond({ code: 'database-unavailable', message: error.message }, 503);
+      return noStore({ code: 'database-unavailable', message: error.message }, 503);
     }
-    return respond({ code: 'database-unavailable', message: '健康数据服务暂时不可用，请稍后重试' }, 503);
+    return noStore({ code: 'database-unavailable', message: '健康数据服务暂时不可用，请稍后重试' }, 503);
   }
 }
 
@@ -77,7 +69,7 @@ export async function handleOwnerSave(context: SnapshotContext): Promise<Respons
 
   try {
     const saved = await commitHealthState(db, body.snapshot as never, expectedVersion, now());
-    return respond(saved, 200);
+    return noStore(saved, 200);
   } catch (error) {
     if (error instanceof HealthStateVersionConflict) throw versionConflict(error.message);
     // An empty D1 has no row to update. The first import is a migration, which
@@ -102,7 +94,7 @@ export const onRequest = (context: SnapshotContext): Promise<Response> => {
   const method = context.request.method;
   if (method === 'GET') return handlePublicSnapshot(context);
   if (method === 'PUT') return guard(() => handleOwnerSave(context));
-  return Promise.resolve(respond({ code: 'validation-failed', message: '健康数据接口只接受 GET 和 PUT' }, 405));
+  return Promise.resolve(noStore({ code: 'validation-failed', message: '健康数据接口只接受 GET 和 PUT' }, 405));
 };
 
 /** Map every failure onto one of the stable codes with a no-store body. */
@@ -110,15 +102,14 @@ async function guard(run: () => Promise<Response>): Promise<Response> {
   try {
     return await run();
   } catch (error) {
-    if (error instanceof ApiError) return respond({ code: error.code, message: error.message }, error.status);
-    if (error instanceof D1NotInitializedError) return respond({ code: 'database-unavailable', message: error.message }, 503);
-    if (error instanceof HealthStateVersionConflict) return respond({ code: 'version-conflict', message: error.message }, 409);
-    if (error instanceof D1UnavailableError) return respond({ code: 'database-unavailable', message: error.message }, 503);
-    if (error instanceof SessionStoreError) return respond({ code: 'database-unavailable', message: '健康数据服务暂时不可用，请稍后重试' }, 503);
+    if (error instanceof ApiError) return noStore({ code: error.code, message: error.message }, error.status);
+    if (error instanceof D1NotInitializedError) return noStore({ code: 'database-unavailable', message: error.message }, 503);
+    if (error instanceof HealthStateVersionConflict) return noStore({ code: 'version-conflict', message: error.message }, 409);
+    if (error instanceof D1UnavailableError) return noStore({ code: 'database-unavailable', message: error.message }, 503);
+    if (error instanceof SessionStoreError) return noStore({ code: 'database-unavailable', message: '健康数据服务暂时不可用，请稍后重试' }, 503);
     // A payload the domain refuses, or anything else unexpected: refused, with
     // the unsubmitted input left on the client.
-    return respond({ code: 'validation-failed', message: '健康数据校验失败，未提交输入已保留' }, 400);
+    return noStore({ code: 'validation-failed', message: '健康数据校验失败，未提交输入已保留' }, 400);
   }
 }
 
-export { readHealthStateVersion, type D1DatabaseLike };

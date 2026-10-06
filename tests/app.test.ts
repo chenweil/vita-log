@@ -33,7 +33,7 @@ class FakeAuth implements EditorAuth {
   unlocked = false;
   isUnlocked(): boolean { return this.unlocked; }
   async unlock(): Promise<boolean> { this.unlocked = true; return true; }
-  lock(): void { this.unlocked = false; }
+  async lock(): Promise<void> { this.unlocked = false; }
 }
 
 afterEach(() => {
@@ -239,5 +239,5 @@ describe('static application boundary', () => {
 class FakeAuthUnlocked implements EditorAuth {
   isUnlocked(): boolean { return true; }
   async unlock(): Promise<boolean> { return true; }
-  lock(): void {}
+  async lock(): Promise<void> {}
 }

@@ -1,4 +1,5 @@
 import type { D1DatabaseLike } from './d1-store';
+import { toHex } from './hex';
 
 /**
  * Owner edit sessions, stored in D1 alongside the health snapshot.
@@ -53,7 +54,7 @@ export function readSessionToken(request: Request): string {
 export function randomSessionToken(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return toHex(bytes);
 }
 
 /**
@@ -65,7 +66,7 @@ export function randomSessionToken(): string {
  */
 export async function hashSessionToken(token: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return toHex(new Uint8Array(digest));
 }
 
 export class SessionStoreError extends Error {

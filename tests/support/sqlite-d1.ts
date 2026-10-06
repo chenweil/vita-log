@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import type { D1DatabaseLike, D1Statement } from '../../functions/_lib/d1-store';
 
@@ -10,18 +12,27 @@ import type { D1DatabaseLike, D1Statement } from '../../functions/_lib/d1-store'
  * advance a version and could therefore never report a conflict.
  *
  * Executing the actual statement text removes the entire failure mode. A query
- * that is wrong here is wrong in D1, because it is the same string. This is
- * also why it applies `functions/schema.sql` verbatim — the deployed DDL is
- * covered by every test that uses this double, instead of being a file nothing
- * ever executes.
+ * that is wrong here is wrong in D1, because it is the same string.
+ *
+ * It applies `functions/schema.sql` itself for the same reason. An inlined copy
+ * of the DDL would be a second source of truth that nothing checks: the write
+ * tests would keep running against whatever the copy said while the deployment
+ * ran the file. Reading the file is what makes "the deployed DDL is covered by
+ * every test" true rather than merely intended.
  */
+const DEPLOYED_SCHEMA = readFileSync(fileURLToPath(new URL('../../functions/schema.sql', import.meta.url)), 'utf8')
+  // Strip line comments. This has to happen before the caller splits on `;`,
+  // and it happens here so no caller has to remember: the header prose contains
+  // semicolons that would otherwise cut a comment in half.
+  .replace(/--[^\n]*/g, '');
+
 export class SqliteD1 implements D1DatabaseLike {
   readonly db: DatabaseSync;
   queries: string[] = [];
 
   constructor(
     private readonly behaviour?: { error: Error } | { silentWrites: true },
-    schema: string = DEFAULT_SCHEMA,
+    schema: string = DEPLOYED_SCHEMA,
   ) {
     this.db = new DatabaseSync(':memory:');
     this.db.exec(schema);
@@ -92,21 +103,3 @@ export class SqliteD1 implements D1DatabaseLike {
   }
 }
 
-/**
- * The DDL the deployment actually runs. Copied from functions/schema.sql so
- * the file is what the tests execute; the duplicate is deliberate and is
- * checked by `schema 与 functions/schema.sql 一致` in the owner-write suite.
- */
-export const DEFAULT_SCHEMA = `
-CREATE TABLE IF NOT EXISTS owner_session (
-  token_hash TEXT    PRIMARY KEY,
-  expires_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS health_state (
-  id        INTEGER PRIMARY KEY CHECK (id = 1),
-  payload   TEXT    NOT NULL,
-  version   INTEGER NOT NULL,
-  saved_at  TEXT    NOT NULL
-);
-`;

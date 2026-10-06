@@ -62,8 +62,9 @@ describe('部署路由与浏览器适配器一致', () => {
     // run against a schema the deployment never has. Comments are stripped
     // *before* splitting on `;`, because the header prose contains semicolons
     // that would otherwise cut a comment in half and hand the tail to SQLite.
-    const deployed = readFileSync(join(functionsDirectory, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
-    const fresh = new SqliteD1(undefined, deployed);
+    // The double already reads this file by default; passing it explicitly
+    // here just makes the test's dependency on it visible.
+    const fresh = new SqliteD1();
     const tables = (fresh.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name).sort();
     expect(tables).toEqual(['health_state', 'owner_session']);
 
