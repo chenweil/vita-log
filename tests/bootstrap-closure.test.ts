@@ -125,7 +125,7 @@ describe('公网不存在管理员初始化或密码找回路径', () => {
     const routes = readdirSync(join(projectRoot, 'functions/api'))
       .filter((name) => name.endsWith('.ts'))
       .map((name) => name.replace(/\.ts$/, ''));
-    expect(routes.sort()).toEqual(['login', 'logout', 'owner-snapshot', 'session', 'snapshot']);
+    expect(routes.sort()).toEqual(['login', 'logout', 'migrate', 'migration-preview', 'owner-snapshot', 'session', 'snapshot']);
     for (const route of routes) {
       const source = readFileSync(join(projectRoot, 'functions/api', `${route}.ts`), 'utf8');
       expect(source, `functions/api/${route}.ts 含 setup/注册/找回`).not.toMatch(/\/api\/(setup|register|reset|forgot|recover)\b/);

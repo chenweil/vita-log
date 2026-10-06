@@ -2,9 +2,9 @@ import { createPublicSnapshot } from '../../src/public-snapshot';
 import {
   commitHealthState, D1NotInitializedError, D1UnavailableError, HealthStateVersionConflict, readHealthState,
 } from '../_lib/d1-store';
-import { ApiError, noStore, readJsonBody, requireSameOrigin, unauthorized, versionConflict, type FunctionContext } from '../_lib/api';
+import { ApiError, guardApiErrors, noStore, readJsonBody, requireSameOrigin, unauthorized, versionConflict, type FunctionContext } from '../_lib/api';
 import { addressKey, clientIp, consume, sessionKey, WRITE_ATTEMPTS } from '../_lib/rate-limit';
-import { readSessionToken, resolveSession, SessionStoreError } from '../_lib/session';
+import { readSessionToken, resolveSession } from '../_lib/session';
 
 /** The subset of the Pages Functions context this route reads. */
 export type SnapshotContext = FunctionContext;
@@ -80,36 +80,20 @@ export async function handleOwnerSave(context: SnapshotContext): Promise<Respons
   }
 }
 
-export const onRequestPut = (context: SnapshotContext): Promise<Response> => guard(() => handleOwnerSave(context));
+export const onRequestPut = (context: SnapshotContext): Promise<Response> => guardApiErrors(() => handleOwnerSave(context));
 
 /**
  * Dispatch by method.
  *
  * The non-GET methods that are not a save are refused explicitly. A migration,
- * a clear or a backup is a separate, separately authorized operation, and this
- * ticket delivers only the daily save path — so they get a stable refusal
- * rather than a platform default with no code and no no-store header.
+ * a clear or a backup is a separate, separately authorized operation — the
+ * migration lives on `/api/migrate` — so they get a stable refusal rather than
+ * a platform default with no code and no no-store header.
  */
 export const onRequest = (context: SnapshotContext): Promise<Response> => {
   const method = context.request.method;
   if (method === 'GET') return handlePublicSnapshot(context);
-  if (method === 'PUT') return guard(() => handleOwnerSave(context));
+  if (method === 'PUT') return guardApiErrors(() => handleOwnerSave(context));
   return Promise.resolve(noStore({ code: 'validation-failed', message: '健康数据接口只接受 GET 和 PUT' }, 405));
 };
-
-/** Map every failure onto one of the stable codes with a no-store body. */
-async function guard(run: () => Promise<Response>): Promise<Response> {
-  try {
-    return await run();
-  } catch (error) {
-    if (error instanceof ApiError) return noStore({ code: error.code, message: error.message }, error.status);
-    if (error instanceof D1NotInitializedError) return noStore({ code: 'database-unavailable', message: error.message }, 503);
-    if (error instanceof HealthStateVersionConflict) return noStore({ code: 'version-conflict', message: error.message }, 409);
-    if (error instanceof D1UnavailableError) return noStore({ code: 'database-unavailable', message: error.message }, 503);
-    if (error instanceof SessionStoreError) return noStore({ code: 'database-unavailable', message: '健康数据服务暂时不可用，请稍后重试' }, 503);
-    // A payload the domain refuses, or anything else unexpected: refused, with
-    // the unsubmitted input left on the client.
-    return noStore({ code: 'validation-failed', message: '健康数据校验失败，未提交输入已保留' }, 400);
-  }
-}
 
