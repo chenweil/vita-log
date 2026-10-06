@@ -58,6 +58,20 @@ const deployed = (db = new SqliteD1()): CloudflareRuntime => {
   return runtime;
 };
 
+/**
+ * The snapshot D1 holds, with the owner's own theme colour on it.
+ *
+ * `primaryColor` is deliberately owner-only: it is absent from the public
+ * projection, which rebuilds it from the defaults. It is therefore the field
+ * that shows *which* snapshot a save wrote back — the owner's, or the one a
+ * visitor can see.
+ */
+const ownerOnlySnapshot = (): HealthSnapshot => {
+  const snapshot = ownerSnapshot();
+  snapshot.settings.primaryColor = '#123456';
+  return snapshot;
+};
+
 /** The payload D1 currently holds, decoded. */
 const stored = (runtime: CloudflareRuntime): HealthSnapshot => {
   const row = runtime.db.db.prepare('SELECT payload FROM health_state WHERE id = 1').get() as { payload: string };
@@ -137,31 +151,44 @@ const opened = (page: Page): void => {
   if (page.container.querySelector('[data-action="reload"]') === null) throw new Error('page still loading');
 };
 
+/** The status the page shows while a read is in flight. */
+const READING = '正在读取服务端最新数据';
+
 /**
- * A finished login has reached one of three terminal states: the editor is open,
- * the modal came back with an error, or the reload failed outright.
+ * A finished login has reached one of four terminal states: the editor is open,
+ * the modal came back with an error, the reload failed outright, or the reload
+ * came back without the complete snapshot the editor needs.
  *
- * "The modal is gone" is not one of them, and treating it as one is a race: the
- * modal closes on the first render *inside* the post-login reload, so a test
- * that waited only for its disappearance continued while the owner snapshot was
- * still being fetched. The version conflict case below then seeded the database
- * mid-reload and the save quietly succeeded against the value it picked up
- * afterwards.
+ * Neither "the modal is gone" nor "the editor appeared" is one of them, and
+ * treating either as one is a race: the modal closes on the first render
+ * *inside* the post-login reload, so a test that waited only for its
+ * disappearance continued while the owner snapshot was still being fetched. The
+ * version conflict case below then seeded the database mid-reload and the save
+ * quietly succeeded against the value it picked up afterwards. The read has to
+ * be waited out — but not for a particular outcome, or a login that correctly
+ * ends in read-only would look like one that never finished.
  */
 const loginFinished = (page: Page): void => {
-  if (page.container.querySelector('#authForm .form-error')) return;
-  if (page.container.querySelector('#bodyRecordForm')) return;
-  if (page.container.querySelector('.fatal-state')) return;
-  throw new Error('login still in flight');
+  const container = page.container;
+  if (container.querySelector('#authForm .form-error')) return;
+  if (container.querySelector('.fatal-state')) return;
+  if (container.querySelector('#authForm')) throw new Error('the login has not been submitted yet');
+  if (container.textContent?.includes(READING)) throw new Error('the owner reload is still in flight');
+};
+
+/** Fill and submit the login form without waiting for the round trip. */
+const submitLogin = (page: Page, username = OWNER, password = PASSWORD): void => {
+  const form = page.container.querySelector<HTMLFormElement>('#authForm');
+  if (!form) throw new Error('auth modal not open');
+  form.querySelector<HTMLInputElement>('input[name="username"]')!.value = username;
+  form.querySelector<HTMLInputElement>('input[name="password"]')!.value = password;
+  form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
 };
 
 const openEditor = async (page: Page, username = OWNER, password = PASSWORD): Promise<void> => {
   await click(page, '[data-action="auth-toggle"]');
   await until(() => { if (!page.container.querySelector('#authForm')) throw new Error('auth modal not open'); }, 'the auth modal');
-  const form = page.container.querySelector<HTMLFormElement>('#authForm')!;
-  form.querySelector<HTMLInputElement>('input[name="username"]')!.value = username;
-  form.querySelector<HTMLInputElement>('input[name="password"]')!.value = password;
-  form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+  submitLogin(page, username, password);
   await until(() => loginFinished(page), 'the login to finish');
 };
 
@@ -305,6 +332,196 @@ describe('Cloudflare 模式：本人登录后编辑', () => {
     expect(page.container.querySelector('#bodyRecordForm')).toBeNull();
     expect(renderedWriteControls(page)).toEqual([]);
     expect(runtime.db.storedVersion()).toBe(4);
+    runtime.close();
+  });
+});
+
+/**
+ * Editing is a property of the snapshot on screen, not of the session alone.
+ *
+ * The page may hold an owner snapshot or the anonymous public projection, and
+ * only the first can be saved: the projection carries no version and omits
+ * owner-only settings, so writing it back would quietly reset them. These cases
+ * are about the three ways the page can end up holding the projection while a
+ * session appears to be live.
+ */
+describe('Cloudflare 模式：编辑能力只来自完整 owner 快照', () => {
+  it('重新登录的重载期间不渲染编辑器，即使页面还留着上一次的 owner 快照', async () => {
+    const runtime = deployed();
+    let parkNextOwnerRead = false;
+    let ownerReadParked = false;
+    let releaseOwner: () => void = () => {};
+    const ownerReadPending = new Promise<void>((resolve) => { releaseOwner = resolve; });
+    const parkOwnerRead = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const isOwnerRead = (init?.method ?? 'GET') === 'GET' && String(input) === '/api/owner-snapshot';
+      if (!isOwnerRead || !parkNextOwnerRead) return runtime.fetch(input, init);
+      parkNextOwnerRead = false;
+      const response = await runtime.fetch(input, init);
+      ownerReadParked = true;
+      await ownerReadPending;
+      return response;
+    };
+
+    const page = openPage(runtime, { fetch: parkOwnerRead });
+    await until(() => opened(page), 'the initial read');
+    await openEditor(page);
+    await click(page, '[data-action="auth-toggle"]');
+    await until(() => { if (page.container.querySelector('#bodyRecordForm')) throw new Error('still editing'); }, 'the page to return to read-only');
+
+    // Log in again. The page still holds the owner snapshot it read before the
+    // lock, so nothing about the data in hand says "not editable" — only the
+    // reload in progress does. That is the whole point of suppressing the
+    // editor here: an editor over it would offer a save against a version the
+    // repository has already discarded.
+    parkNextOwnerRead = true;
+    await click(page, '[data-action="auth-toggle"]');
+    await until(() => { if (!page.container.querySelector('#authForm')) throw new Error('auth modal not open'); }, 'the auth modal');
+    submitLogin(page);
+    await until(() => {
+      if (!ownerReadParked) throw new Error('the owner reload has not reached the owner route');
+      if (!page.container.textContent?.includes(READING)) throw new Error('the page has not entered the reload yet');
+    }, 'the owner reload to be in flight');
+
+    expect(page.container.querySelector('#bodyRecordForm'), '重载完成前不得渲染编辑器').toBeNull();
+    expect(renderedWriteControls(page)).toEqual([]);
+
+    releaseOwner();
+    await until(() => { if (!page.container.querySelector('#bodyRecordForm')) throw new Error('the editor is not open yet'); }, 'the editor to open after the reload');
+
+    // The reload is what granted editability, and it re-read the server rather
+    // than reusing what was on screen.
+    expect(runtime.db.storedVersion()).toBe(4);
+    expect(page.container.textContent).toContain('本人编辑');
+    runtime.close();
+  });
+
+  it('旧的公共响应晚到时，不得覆盖已登录的 owner 快照并把它保存回去', async () => {
+    const runtime = deployed();
+    runtime.db.seed(JSON.stringify(ownerOnlySnapshot()), 4);
+
+    let releasePublic: () => void = () => {};
+    const publicReadPending = new Promise<void>((resolve) => { releasePublic = resolve; });
+    let publicReads = 0;
+    let staleReadConsumed = false;
+    // Only the *second* public read is parked, so the page finishes its initial
+    // read and reaches a state where the owner can start a refresh. The server
+    // still answers that refresh; what is held back is handing the answer to
+    // the page, which is what lets the refresh land after the login reload.
+    const delayRefresh = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const stale = (init?.method ?? 'GET') === 'GET' && String(input) === '/api/snapshot' && ++publicReads === 2;
+      const response = await runtime.fetch(input, init);
+      if (!stale) return response;
+      await publicReadPending;
+      // `setTimeout` runs after the page's `await response.text()` continuation,
+      // so the flag means "the page has taken this response in", not "the server
+      // has answered it". Counting turns instead would be a guess about how many
+      // microtasks the handler took.
+      return new Proxy(response, {
+        get(target, property, receiver) {
+          if (property === 'text') return async () => {
+            const value = await target.text();
+            setTimeout(() => { staleReadConsumed = true; }, 0);
+            return value;
+          };
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }) as Response;
+    };
+
+    const page = openPage(runtime, { fetch: delayRefresh });
+    await until(() => opened(page), 'the initial read');
+
+    // The owner refreshes, and logs in while that refresh is still open. Both
+    // are ordinary things to do, and the page supports both controls at once.
+    await click(page, '[data-action="reload"]');
+    await until(() => { if (publicReads !== 2) throw new Error('the refresh has not reached the public route'); }, 'the refresh to reach the public route');
+    await openEditor(page);
+    expect(page.container.querySelector('#bodyRecordForm')).not.toBeNull();
+
+    // The anonymous projection now arrives, an answer the page asked for before
+    // it knew there was an owner session.
+    releasePublic();
+    await until(() => { if (!staleReadConsumed) throw new Error('the stale public read has not been consumed'); }, 'the stale public read to land');
+
+    expect(page.container.querySelector('#bodyRecordForm'), '过期的公共响应不得把已登录的编辑态换成只读投影').not.toBeNull();
+    await saveWeight(page, '75.1');
+
+    expect(runtime.db.storedVersion()).toBe(5);
+    expect(stored(runtime).weights.map((record) => record.weightKg)).toEqual([76.4, 75.1]);
+    // The save wrote back the owner's snapshot. Had the page kept the visitor's
+    // projection, the write would have succeeded and reset every owner-only
+    // setting to its default — a 200 that quietly destroys data.
+    expect(stored(runtime).settings.primaryColor, '保存必须写回 owner 快照，而不是访客看得到的公共投影').toBe('#123456');
+    runtime.close();
+  });
+
+  it('登录成功但服务端不返回完整 owner 快照时，页面保持只读并说明原因', async () => {
+    const runtime = deployed();
+    // The session is revoked in the instant between the login succeeding and the
+    // reload that login is supposed to authorize — the owner locking from
+    // another device, or the server dropping the row. The page's own clock has
+    // not run out, so nothing about its state tells it to distrust the read.
+    const revokeOnLogin = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const response = await runtime.fetch(input, init);
+      if (String(input) === '/api/login' && response.ok) runtime.db.db.exec('DELETE FROM owner_session');
+      return response;
+    };
+
+    const page = openPage(runtime, { fetch: revokeOnLogin });
+    await until(() => opened(page), 'the initial read');
+    await openEditor(page);
+
+    // The owner route was asked for and refused, so the read fell back to the
+    // anonymous projection. Unlocking is not what grants editability; a
+    // successful login is not evidence that the owner snapshot arrived.
+    expect(runtime.requests).toContain('GET /api/owner-snapshot');
+    expect(page.container.querySelector('#bodyRecordForm')).toBeNull();
+    expect(renderedWriteControls(page)).toEqual([]);
+    // Silence would leave the owner looking for a login box that will never
+    // appear again.
+    expect(page.container.textContent).toContain('服务端没有返回完整编辑快照');
+    expect(runtime.db.storedVersion()).toBe(4);
+    runtime.close();
+  });
+
+  it('编辑中途会话被撤销后刷新，编辑器关闭且不再提供写入口', async () => {
+    const runtime = deployed();
+    const page = openPage(runtime);
+    await until(() => opened(page), 'the initial read');
+    await openEditor(page);
+    expect(page.container.querySelector('#bodyRecordForm')).not.toBeNull();
+
+    runtime.db.db.exec('DELETE FROM owner_session');
+    await click(page, '[data-action="reload"]');
+    await until(() => { if (page.container.querySelector('#bodyRecordForm')) throw new Error('still editing'); }, 'the editor to close');
+
+    // The refresh fell back to the projection. A live-looking session is not a
+    // reason to keep an editor whose saves the server would refuse.
+    expect(renderedWriteControls(page)).toEqual([]);
+    expect(page.container.textContent).toContain('服务端没有返回完整编辑快照');
+    expect(runtime.db.storedVersion()).toBe(4);
+    runtime.close();
+  });
+});
+
+describe('Cloudflare 模式：恢复点', () => {
+  it('D1 保存后不谎称有恢复点：恢复按钮保持禁用', async () => {
+    const runtime = deployed();
+    const page = openPage(runtime);
+    await until(() => opened(page), 'the initial read');
+    await openEditor(page);
+    await saveWeight(page, '75.1');
+    expect(runtime.db.storedVersion()).toBe(5);
+
+    // D1 has no recovery endpoint in this deployment, so this save could not
+    // have left anything to restore. Enabling the button would promise a way
+    // back that fails at the exact moment the owner needs it — and "已清空全部
+    // 记录，可从恢复点还原" would be a promise with nothing behind it.
+    const button = page.container.querySelector<HTMLButtonElement>('[data-action="restore-recovery"]');
+    expect(button, '在线模式的恢复按钮仍然渲染，只是保持禁用').not.toBeNull();
+    expect(button?.disabled).toBe(true);
+    expect(page.container.textContent).toContain('暂无恢复快照');
     runtime.close();
   });
 });

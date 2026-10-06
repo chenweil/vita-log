@@ -4,7 +4,7 @@ import { deleteDiet, saveDiet } from './diet-editor';
 import { exportCsv, exportJson, importCsvPreview, importJsonPreview, type CsvKind, type TransferPreview } from './data-transfer';
 import { calculateBmi, calculateWhr, latestByDate, type DietRecord, type HealthSnapshot, type WeightRecord } from './domain';
 import { deleteMeasurement, deleteWeight, saveBodyRecords, type BodyRecordTarget } from './record-editor';
-import { LocalStorageHealthRepository, StorageError, type HealthDataRepository, type LoadStatus } from './storage';
+import { LocalStorageHealthRepository, StorageError, type HealthDataRepository, type LoadStatus, type SnapshotScope } from './storage';
 import { createPublication, serializePublication } from './publication';
 
 type StorageViewState = LoadStatus | 'saving' | 'saved' | 'error';
@@ -53,7 +53,7 @@ type SaveErrorTarget = 'body' | 'step' | 'diet' | 'transfer';
  * the page is read-only — not the same sentence next to a button that goes
  * nowhere.
  */
-const lockedHint = (text: string, canEdit: boolean): string => (canEdit ? text : '当前为纯静态只读页面，没有编辑入口。');
+const lockedHint = (text: string, canUnlock: boolean): string => (canUnlock ? text : '当前为纯静态只读页面，没有编辑入口。');
 
 export interface AppMountOptions {
   mode?: 'owner' | 'reader';
@@ -91,6 +91,8 @@ interface PageCopy {
   storageFoot: string;
   footerTitle: string;
   footerNote: string;
+  /** Shown when the page holds a session but could not be given the full snapshot. */
+  noOwnerSnapshot: string;
 }
 
 const COPY: Record<'browser' | 'server', PageCopy> = {
@@ -114,6 +116,7 @@ const COPY: Record<'browser' | 'server', PageCopy> = {
     storageFoot: '请定期导出完整备份，避免浏览器数据成为唯一副本。',
     footerTitle: '独立静态版',
     footerNote: '数据只保存在当前浏览器',
+    noOwnerSnapshot: '没有读取到完整编辑快照，页面保持只读。',
   },
   server: {
     reading: '正在读取服务端最新数据…',
@@ -135,6 +138,7 @@ const COPY: Record<'browser' | 'server', PageCopy> = {
     storageFoot: '刷新即可看到本人最近的保存；页面不会回退到旧缓存或本机副本。',
     footerTitle: '在线版',
     footerNote: '数据保存在服务端，本页只读取',
+    noOwnerSnapshot: '服务端没有返回完整编辑快照，页面保持只读。',
   },
 };
 
@@ -186,7 +190,29 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
    * to write against.
    */
   let reloadingForOwner = false;
-  const canEdit = (): boolean => !readerMode && !sessionRefused && !reloadingForOwner && auth.isUnlocked();
+  /**
+   * What the snapshot on screen actually is.
+   *
+   * A live session is not enough: the anonymous public projection is what a
+   * read falls back to whenever the owner route says 401, and saving it would
+   * answer 200 while resetting every owner-only setting to its default. The
+   * repository names the scope of the snapshot it returned, and the page holds
+   * onto it — so editing is a property of the data in hand, not of the session
+   * flag that happened to be true when it arrived.
+   */
+  let snapshotScope: SnapshotScope = 'projection';
+  /**
+   * Numbers reads so a slow one cannot overwrite a newer one.
+   *
+   * Reads overlap by design: the refresh button and the login form are both on
+   * screen while a read is in flight, and the owner can use them in that order.
+   * The projection answers the first read and the owner snapshot the second; if
+   * the older answer were allowed to land last, the page would end up holding
+   * the visitor's view while the repository still holds the owner's version —
+   * and the next save would write that view back.
+   */
+  let readSequence = 0;
+  const canEdit = (): boolean => !readerMode && !sessionRefused && !reloadingForOwner && snapshotScope === 'owner' && auth.isUnlocked();
   let snapshot: HealthSnapshot | null = null;
   let storageState: StorageViewState = 'saving';
   let storageMessage = copy.reading;
@@ -229,12 +255,18 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
   };
 
   const load = async (): Promise<void> => {
+    const read = ++readSequence;
+    // A read that has already been overtaken changes nothing, not even the
+    // status line: it describes a state the page has since left.
+    const superseded = (): boolean => read !== readSequence;
     storageState = 'saving';
     storageMessage = copy.reading;
     render();
     try {
       const result = await repository.load();
+      if (superseded()) return;
       snapshot = result.snapshot;
+      snapshotScope = result.scope;
       persistedSnapshot = result.status === 'loaded';
       if (result.status === 'new') {
         storageState = 'saved';
@@ -243,9 +275,23 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
         storageState = 'loaded';
         storageMessage = copy.loaded;
       }
-      void repository.loadRecovery().then(() => { recoveryAvailable = true; if (snapshot) render(); }).catch(() => { recoveryAvailable = false; });
+      // A session the page still believes in, answered with the projection, is
+      // the one read that "已读取服务端最新快照" would misdescribe: the owner
+      // asked to edit and did not get what editing needs. Silence would leave
+      // them hunting for a login box that is never going to reappear.
+      if (result.scope === 'projection' && auth.isUnlocked()) {
+        storageState = 'error';
+        storageMessage = copy.noOwnerSnapshot;
+      }
+      // The recovery probe rides on the read that asked for it: a stale read's
+      // answer must not decide whether the current snapshot has a way back.
+      void repository.loadRecovery()
+        .then(() => { if (superseded()) return; recoveryAvailable = true; if (snapshot) render(); })
+        .catch(() => { if (superseded()) return; recoveryAvailable = false; });
     } catch (error) {
+      if (superseded()) return;
       snapshot = null;
+      snapshotScope = 'projection';
       storageState = 'error';
       storageMessage = error instanceof StorageError ? error.message : copy.loadFailed;
     }
@@ -262,7 +308,11 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     try {
       await repository.commit(next);
       snapshot = next;
-      recoveryAvailable = recoveryAvailable || persistedSnapshot;
+      // Only a repository that keeps the previous snapshot can have just made
+      // one. D1 deploys no recovery endpoint, and enabling the restore control
+      // there would offer a way back that fails — right next to "已清空全部
+      // 记录，可从恢复点还原".
+      if (repository.keepsRecoveryPoint) recoveryAvailable = recoveryAvailable || persistedSnapshot;
       persistedSnapshot = true;
       storageState = 'saved';
       storageMessage = copy.saved;
@@ -512,7 +562,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       if (!backup || !window.confirm(`将先备份当前 SQLite，再恢复 ${backup.name}（${backup.summary.total} 条记录）。继续吗？`)) return;
       await sqlite.restore(backup.name);
       const loaded = await repository.load();
-      snapshot = loaded.snapshot; storageState = 'saved'; storageMessage = '已恢复 SQLite 备份'; transferMessage = `已恢复：${backup.name}`;
+      snapshot = loaded.snapshot; snapshotScope = loaded.scope; storageState = 'saved'; storageMessage = '已恢复 SQLite 备份'; transferMessage = `已恢复：${backup.name}`;
     } catch (error) { transferMessage = error instanceof StorageError ? error.message : 'SQLite 恢复失败，当前数据未改变'; }
     render();
   };
@@ -582,6 +632,10 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       // against, and the owner-only settings it omits. Editing it would fail
       // on the first save (or silently drop settings), so the reload is what
       // actually grants editability — not the flag below.
+      //
+      // Whether the reload actually delivered an owner snapshot is decided
+      // inside `load`, where the scope is bound to the snapshot it returns, so
+      // a second caller cannot forget to check it.
       reloadingForOwner = true;
       try { await load(); } finally { reloadingForOwner = false; }
       // A reload that failed leaves no snapshot and the error screen up. Do

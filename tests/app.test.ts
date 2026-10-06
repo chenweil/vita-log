@@ -11,6 +11,8 @@ import { ReadOnlyEditorAuth } from '../src/auth';
 class FakeRepository implements HealthDataRepository {
   commits: HealthSnapshot[] = [];
   failCommits = false;
+  /** Mirrors the browser store, which does keep a recovery point on commit. */
+  readonly keepsRecoveryPoint = true;
 
   constructor(private readonly result: LoadResult | StorageError) {}
 
@@ -48,7 +50,7 @@ describe('static application boundary', () => {
     const snapshot = createEmptySnapshot('2026-09-28T00:00:00.000Z');
     snapshot.settings.name = 'Along';
 
-    mountApp(container, new FakeRepository({ snapshot, status: 'loaded' }));
+    mountApp(container, new FakeRepository({ snapshot, status: 'loaded', scope: 'owner' }));
     await Promise.resolve();
 
     expect(container.textContent).toContain('Along，今天也稳稳向前。');
@@ -73,7 +75,7 @@ describe('static application boundary', () => {
   it('requires owner access before allowing a body record to be saved', async () => {
     const container = document.createElement('div');
     document.body.append(container);
-    const repository = new FakeRepository({ snapshot: createEmptySnapshot('2026-09-28T00:00:00.000Z'), status: 'loaded' });
+    const repository = new FakeRepository({ snapshot: createEmptySnapshot('2026-09-28T00:00:00.000Z'), status: 'loaded', scope: 'owner' });
     const auth = new FakeAuth();
     mountApp(container, repository, auth);
     await Promise.resolve();
@@ -109,7 +111,7 @@ describe('static application boundary', () => {
     document.body.append(container);
     const snapshot = createEmptySnapshot('2026-09-28T00:00:00.000Z');
     snapshot.weights.push({ id: 'w1', date: '2026-10-03', weightKg: 77, note: '', createdAt: '2026-09-28T00:00:00.000Z', updatedAt: '2026-09-28T00:00:00.000Z' });
-    const repository = new FakeRepository({ snapshot, status: 'loaded' });
+    const repository = new FakeRepository({ snapshot, status: 'loaded', scope: 'owner' });
     mountApp(container, repository, new FakeAuthUnlocked());
     await Promise.resolve();
     window.confirm = () => false;
@@ -124,6 +126,44 @@ describe('static application boundary', () => {
     expect(repository.commits).toHaveLength(0);
   });
 
+  it('keeps the restore control live where a save really does leave a recovery point', async () => {
+    // The counterpart to "D1 must not enable the restore control on a save":
+    // the browser store moves the previous snapshot into RECOVERY_KEY on every
+    // commit, so here the control has to come alive and the restore has to work.
+    // Without this, a fix that simply never enables it would pass everything.
+    const seeded = createEmptySnapshot('2026-10-06T07:00:00.000Z');
+    seeded.weights = [{ id: 'w1', date: '2026-10-06', weightKg: 76.4, note: '晨起空腹', createdAt: '2026-10-06T07:00:00.000Z', updatedAt: '2026-10-06T07:00:00.000Z' }];
+    const values = new Map<string, string>([[SNAPSHOT_KEY, JSON.stringify(seeded)]]);
+    const storage: StorageLike = {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => { values.set(key, value); },
+      removeItem: (key) => { values.delete(key); },
+    };
+    const container = document.createElement('div');
+    document.body.append(container);
+    window.confirm = () => true;
+    mountApp(container, new LocalStorageHealthRepository(storage), new FakeAuthUnlocked());
+    const settle = async (): Promise<void> => { for (let turn = 0; turn < 6; turn += 1) await Promise.resolve(); };
+    await settle();
+
+    const form = container.querySelector<HTMLFormElement>('#bodyRecordForm');
+    if (!form) throw new Error('body form missing');
+    form.querySelector<HTMLInputElement>('input[name="date"]')!.value = '2026-10-09';
+    form.querySelector<HTMLInputElement>('input[name="weightKg"]')!.value = '75.1';
+    form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+    await settle();
+
+    const button = container.querySelector<HTMLButtonElement>('[data-action="restore-recovery"]');
+    expect(container.textContent).toContain('已有可恢复快照');
+    expect(button?.disabled, '浏览器存储确实留下了恢复点，恢复按钮必须可用').toBe(false);
+    expect((JSON.parse(storage.getItem(RECOVERY_KEY)!) as HealthSnapshot).weights[0]?.weightKg).toBe(76.4);
+
+    button!.click();
+    await settle();
+
+    expect((JSON.parse(storage.getItem(SNAPSHOT_KEY)!) as HealthSnapshot).weights[0]?.weightKg, '恢复后应当回到保存前的快照').toBe(76.4);
+  });
+
   it('renders a measurement trend when two measurements exist', async () => {
     const container = document.createElement('div');
     document.body.append(container);
@@ -132,7 +172,7 @@ describe('static application boundary', () => {
       { id: 'm1', date: '2026-10-02', waistCm: 91, hipCm: 101, note: '', createdAt: '2026-09-28T00:00:00.000Z', updatedAt: '2026-09-28T00:00:00.000Z' },
       { id: 'm2', date: '2026-10-03', waistCm: 90, hipCm: 100, note: '', createdAt: '2026-09-28T00:00:00.000Z', updatedAt: '2026-09-28T00:00:00.000Z' },
     );
-    mountApp(container, new FakeRepository({ snapshot, status: 'loaded' }), new FakeAuthUnlocked());
+    mountApp(container, new FakeRepository({ snapshot, status: 'loaded', scope: 'owner' }), new FakeAuthUnlocked());
     await Promise.resolve();
 
     expect(container.querySelector('[aria-label="腰围与臀围趋势折线图"]')).not.toBeNull();
@@ -141,7 +181,7 @@ describe('static application boundary', () => {
   it('saves a diet record and shows its nutrition target summary in owner mode', async () => {
     const container = document.createElement('div');
     document.body.append(container);
-    const repository = new FakeRepository({ snapshot: createEmptySnapshot('2026-09-28T00:00:00.000Z'), status: 'loaded' });
+    const repository = new FakeRepository({ snapshot: createEmptySnapshot('2026-09-28T00:00:00.000Z'), status: 'loaded', scope: 'owner' });
     mountApp(container, repository, new FakeAuthUnlocked());
     await Promise.resolve();
     const form = container.querySelector<HTMLFormElement>('#dietForm');
@@ -164,7 +204,7 @@ describe('static application boundary', () => {
   it('shows diet persistence errors in the diet form and global status', async () => {
     const container = document.createElement('div');
     document.body.append(container);
-    const repository = new FakeRepository({ snapshot: createEmptySnapshot('2026-09-28T00:00:00.000Z'), status: 'loaded' });
+    const repository = new FakeRepository({ snapshot: createEmptySnapshot('2026-09-28T00:00:00.000Z'), status: 'loaded', scope: 'owner' });
     repository.failCommits = true;
     mountApp(container, repository, new FakeAuthUnlocked());
     await Promise.resolve();
@@ -203,7 +243,7 @@ describe('static application boundary', () => {
     const container = document.createElement('div');
     document.body.append(container);
     const snapshot = createEmptySnapshot('2026-10-05T00:00:00.000Z');
-    const repository = new FakeRepository({ snapshot, status: 'loaded' });
+    const repository = new FakeRepository({ snapshot, status: 'loaded', scope: 'owner' });
     mountApp(container, repository, new FakeAuthUnlocked());
     await Promise.resolve();
 
@@ -223,7 +263,7 @@ describe('static application boundary', () => {
   it('shows invalid JSON in import preview and prevents committing it', async () => {
     const container = document.createElement('div');
     document.body.append(container);
-    const repository = new FakeRepository({ snapshot: createEmptySnapshot(), status: 'loaded' });
+    const repository = new FakeRepository({ snapshot: createEmptySnapshot(), status: 'loaded', scope: 'owner' });
     mountApp(container, repository, new FakeAuthUnlocked());
     await Promise.resolve();
     const input = container.querySelector<HTMLInputElement>('#transferFile');

@@ -20,6 +20,13 @@ const SERVER_ERROR_CODES = new Set<StorageError['code']>([
  * visitor having no health data at all.
  */
 export class D1HealthRepository implements HealthDataRepository {
+  /**
+   * No recovery endpoint is deployed in this mode; restoring a snapshot is
+   * #06.1-05's work. Declaring it here is what keeps the page from enabling a
+   * restore control that could only fail.
+   */
+  readonly keepsRecoveryPoint = false;
+
   private version: number | null = null;
   constructor(private readonly client: Fetcher = window) {}
 
@@ -33,7 +40,7 @@ export class D1HealthRepository implements HealthDataRepository {
         if (!Number.isSafeInteger(data.version) || Number(data.version) < 0) throw new Error('Invalid version');
         const snapshot = normalizeSnapshot(data.snapshot);
         this.version = Number(data.version);
-        return { snapshot, status: 'loaded' };
+        return { snapshot, status: 'loaded', scope: 'owner' };
       } catch (error) {
         throw new StorageError('database-unavailable', '健康数据服务返回了无法识别的内容，请稍后重试', { cause: error });
       }
@@ -44,7 +51,9 @@ export class D1HealthRepository implements HealthDataRepository {
     const response = await this.request('/api/snapshot');
     if (!response.ok) throw await this.errorFrom(response);
     try {
-      return { snapshot: toHealthSnapshot(parsePublicSnapshot(await response.text())), status: 'loaded' };
+      // `projection` is the whole point of naming this: what the page holds now
+      // is not the record the owner saves back.
+      return { snapshot: toHealthSnapshot(parsePublicSnapshot(await response.text())), status: 'loaded', scope: 'projection' };
     } catch (error) {
       throw new StorageError('database-unavailable', '健康数据服务返回了无法识别的内容，请稍后重试', { cause: error });
     }

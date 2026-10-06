@@ -11,15 +11,39 @@ export interface StorageLike {
 
 export type LoadStatus = 'new' | 'loaded';
 
+/**
+ * What a loaded snapshot is allowed to become.
+ *
+ * `owner` is the complete owner record, and the only thing that may be saved
+ * back. `projection` is everything else the page may show but must never write:
+ * the anonymous public view — which drops owner-only settings and carries no
+ * version, so saving it would answer 200 while resetting them — and a published
+ * snapshot file, which is complete but frozen and is not the source of truth.
+ *
+ * The page has to know which of the two it is holding rather than inferring it
+ * from a version number it cannot see.
+ */
+export type SnapshotScope = 'owner' | 'projection';
+
 export interface LoadResult {
   snapshot: HealthSnapshot;
   status: LoadStatus;
+  scope: SnapshotScope;
 }
 
 export interface HealthDataRepository {
   load(): Promise<LoadResult>;
   commit(snapshot: HealthSnapshot): Promise<void>;
   loadRecovery(): Promise<HealthSnapshot>;
+  /**
+   * Whether `commit` leaves the previous snapshot behind as one `loadRecovery`
+   * can return.
+   *
+   * A repository that does not keep one must not get its restore control
+   * enabled just because a save succeeded: the promise that a cleared record is
+   * recoverable has to be backed by something that can actually recover it.
+   */
+  readonly keepsRecoveryPoint: boolean;
 }
 
 export type StorageErrorCode = 'read-failed' | 'malformed' | 'write-failed' | 'recovery-unavailable' | 'database-unavailable' | 'unauthorized' | 'version-conflict' | 'validation-failed' | 'migration-conflict' | 'backup-failed';
@@ -32,6 +56,9 @@ export class StorageError extends Error {
 }
 
 export class LocalStorageHealthRepository implements HealthDataRepository {
+  /** `commit` moves the current snapshot into `RECOVERY_KEY` before overwriting. */
+  readonly keepsRecoveryPoint = true;
+
   constructor(private readonly storage: StorageLike) {}
 
   async load(): Promise<LoadResult> {
@@ -43,11 +70,11 @@ export class LocalStorageHealthRepository implements HealthDataRepository {
     }
 
     if (raw === null) {
-      return { snapshot: createEmptySnapshot(), status: 'new' };
+      return { snapshot: createEmptySnapshot(), status: 'new', scope: 'owner' };
     }
 
     try {
-      return { snapshot: normalizeSnapshot(JSON.parse(raw) as unknown), status: 'loaded' };
+      return { snapshot: normalizeSnapshot(JSON.parse(raw) as unknown), status: 'loaded', scope: 'owner' };
     } catch (error) {
       if (error instanceof StorageError) throw error;
       throw new StorageError('malformed', '本地健康数据损坏，未将其当成空数据处理', { cause: error });

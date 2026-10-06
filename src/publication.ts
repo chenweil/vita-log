@@ -62,10 +62,13 @@ export function parsePublication(raw: string): PublishedHealthSnapshot {
 }
 
 export class PublishedHealthRepository implements HealthDataRepository {
+  /** A published file is a download, not a place a recovery point can come from. */
+  readonly keepsRecoveryPoint = false;
+
   constructor(private readonly publication: PublishedHealthSnapshot) {}
 
   async load(): Promise<LoadResult> {
-    return { snapshot: normalizeSnapshot(this.publication.snapshot), status: 'loaded' };
+    return { snapshot: normalizeSnapshot(this.publication.snapshot), status: 'loaded', scope: 'projection' };
   }
 
   async commit(_snapshot: HealthSnapshot): Promise<void> {

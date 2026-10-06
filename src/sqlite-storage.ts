@@ -6,6 +6,9 @@ export interface SqliteMigrationPreview { source: string; empty: boolean; summar
 interface Fetcher { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> }
 
 export class SqliteHealthRepository implements HealthDataRepository {
+  /** Every server-side write keeps the previous payload in its `recovery` column. */
+  readonly keepsRecoveryPoint = true;
+
   private version = 0;
   private loaded = false;
   constructor(private readonly client: Fetcher = window) {}
@@ -14,7 +17,7 @@ export class SqliteHealthRepository implements HealthDataRepository {
     const data = await readJson<SqliteLoadResponse>(response);
     this.version = data.version;
     this.loaded = true;
-    return { snapshot: normalizeSnapshot(data.snapshot), status: data.empty ? 'new' : 'loaded' };
+    return { snapshot: normalizeSnapshot(data.snapshot), status: data.empty ? 'new' : 'loaded', scope: 'owner' };
   }
   async commit(snapshot: HealthSnapshot): Promise<void> {
     if (!this.loaded) await this.load();
