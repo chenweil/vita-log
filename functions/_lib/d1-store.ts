@@ -41,6 +41,7 @@ export class HealthStateVersionConflict extends Error {
 
 export const HEALTH_STATE_QUERY = 'SELECT payload FROM health_state WHERE id = ?';
 export const HEALTH_STATE_VERSION_QUERY = 'SELECT version FROM health_state WHERE id = ?';
+export const HEALTH_STATE_QUERY_FULL = 'SELECT payload, version, saved_at FROM health_state WHERE id = ?';
 /**
  * The optimistic-concurrency write.
  *
@@ -86,18 +87,46 @@ export async function readHealthState(db: D1DatabaseLike | undefined): Promise<H
   return decodeSnapshot(row.payload);
 }
 
+/** The raw payload, version and timestamp of the single health row. */
+export interface StoredHealthState {
+  payload: string;
+  version: number;
+  savedAt: string;
+}
+
 /** Read payload and its concurrency version from the same D1 row/query. */
 export async function readOwnerHealthState(db: D1DatabaseLike | undefined): Promise<{ snapshot: HealthSnapshot; version: number }> {
+  const stored = await readStoredHealthState(db);
+  return { snapshot: decodeSnapshot(stored.payload), version: stored.version };
+}
+
+/**
+ * Read the row as stored, without interpreting the payload.
+ *
+ * The migration reconciliation needs the row exactly as D1 holds it: it compares
+ * the stored payload against the payload it meant to write, and decoding first
+ * would destroy the evidence of what was actually stored. A payload D1 cannot
+ * read raises here, as everywhere else, rather than decoding to something
+ * plausible.
+ */
+export async function readStoredHealthState(db: D1DatabaseLike | undefined): Promise<StoredHealthState> {
   if (!db) throw new D1UnavailableError('D1 数据库绑定缺失');
   let row: Record<string, unknown> | null;
   try {
-    row = await db.prepare('SELECT payload, version FROM health_state WHERE id = ?').bind(1).first<Record<string, unknown>>();
+    row = await db.prepare(HEALTH_STATE_QUERY_FULL).bind(1).first<Record<string, unknown>>();
   } catch (error) {
     throw new D1UnavailableError('D1 数据库查询失败', { cause: error });
   }
   if (!row) throw new D1NotInitializedError('D1 尚未导入健康数据，请等待本人完成首次迁移');
+  if (typeof row.payload !== 'string' || row.payload.length === 0) throw new D1UnavailableError('D1 健康数据载荷缺失');
   if (!Number.isSafeInteger(row.version) || Number(row.version) < 0) throw new D1UnavailableError('D1 健康数据版本无效');
-  return { snapshot: decodeSnapshot(row.payload), version: Number(row.version) };
+  if (typeof row.saved_at !== 'string' || row.saved_at.length === 0) throw new D1UnavailableError('D1 健康数据时间戳缺失');
+  return { payload: row.payload, version: Number(row.version), savedAt: row.saved_at };
+}
+
+/** Decode a stored payload, raising rather than falling back to empty data. */
+export function normalizeHealthSnapshot(payload: unknown): HealthSnapshot {
+  return decodeSnapshot(payload);
 }
 
 function decodeSnapshot(payload: unknown): HealthSnapshot {
@@ -137,6 +166,33 @@ export interface CommittedHealthState {
   savedAt: string;
 }
 
+export interface PreparedVersionedState extends CommittedHealthState {
+  payload: string;
+}
+
+/**
+ * Turn a snapshot plus the version the caller believes D1 holds into the exact
+ * row contents and the next version.
+ *
+ * This is the shared half of every write to `health_state`, and it is shared on
+ * purpose: the daily save (an UPDATE) and the first import (an INSERT) differ
+ * only in which statement carries these values. Keeping the arithmetic and the
+ * payload normalization in one place is what stops the two paths from drifting
+ * into computing different rows from the same snapshot and the same version.
+ *
+ * `updatedAt` and `saved_at` come from the same clock, so the snapshot can never
+ * claim to have been saved at a time its own row disagrees with.
+ */
+export function prepareVersionedState(
+  snapshot: HealthSnapshot,
+  expectedVersion: number,
+  now: number,
+): PreparedVersionedState {
+  const savedAt = new Date(now).toISOString();
+  const next: HealthSnapshot = { ...normalizeSnapshot(snapshot), updatedAt: savedAt };
+  return { payload: JSON.stringify(next), savedAt, version: expectedVersion + 1 };
+}
+
 /**
  * Commit a versioned snapshot, or report that the caller's version is stale.
  *
@@ -154,13 +210,11 @@ export async function commitHealthState(
   now: number,
 ): Promise<CommittedHealthState> {
   if (!db) throw new D1UnavailableError('D1 数据库绑定缺失');
-  const savedAt = new Date(now).toISOString();
-  const next: HealthSnapshot = { ...normalizeSnapshot(snapshot), updatedAt: savedAt };
-  const nextVersion = expectedVersion + 1;
+  const { payload, savedAt, version: nextVersion } = prepareVersionedState(snapshot, expectedVersion, now);
 
   let changes: number | undefined;
   try {
-    const result = await db.prepare(HEALTH_STATE_WRITE).bind(JSON.stringify(next), savedAt, nextVersion, 1, expectedVersion).run();
+    const result = await db.prepare(HEALTH_STATE_WRITE).bind(payload, savedAt, nextVersion, 1, expectedVersion).run();
     changes = result?.meta?.changes;
   } catch (error) {
     throw new D1UnavailableError('D1 健康数据保存失败', { cause: error });

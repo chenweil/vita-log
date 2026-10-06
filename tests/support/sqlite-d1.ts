@@ -31,7 +31,7 @@ export class SqliteD1 implements D1DatabaseLike {
   queries: string[] = [];
 
   constructor(
-    private readonly behaviour?: { error: Error } | { silentWrites: true },
+    private readonly behaviour?: { error: Error } | { silentWrites: true } | { silentInsert: true } | { failOn: RegExp },
     schema: string = DEPLOYED_SCHEMA,
   ) {
     this.db = new DatabaseSync(':memory:');
@@ -76,14 +76,23 @@ export class SqliteD1 implements D1DatabaseLike {
 
     const first = async <T = Record<string, unknown>>(): Promise<T | null> => {
       if (behaviour && 'error' in behaviour) throw behaviour.error;
+      // `failOn` targets one statement so a test can make the write fail while
+      // the session lookup in front of it still succeeds. Without that, "the
+      // database is down" and "this particular write is down" are the same test,
+      // and only the first one is ever exercised.
+      if (behaviour && 'failOn' in behaviour && behaviour.failOn.test(query)) throw new Error(`statement refused: ${query}`);
       return (db.prepare(query).get(...(bound as never[])) as T | undefined) ?? null;
     };
     const run = async (): Promise<{ meta: { changes?: number } }> => {
       if (behaviour && 'error' in behaviour) throw behaviour.error;
+      if (behaviour && 'failOn' in behaviour && behaviour.failOn.test(query)) throw new Error(`statement refused: ${query}`);
       // Only the versioned save goes unreported. Silencing every statement
       // would also swallow the session insert, and the request would then be
       // refused as unauthenticated — passing for the wrong reason.
       if (behaviour && 'silentWrites' in behaviour && /UPDATE health_state/.test(query)) return { meta: {} };
+      // Same reasoning for the migration's own INSERT: D1 is allowed to report
+      // no change count at all, and the code has to refuse rather than assume.
+      if (behaviour && 'silentInsert' in behaviour && /INSERT INTO health_state/.test(query)) return { meta: {} };
       // node:sqlite reports the same change count D1 puts in `meta`.
       return { meta: { changes: Number(db.prepare(query).run(...(bound as never[])).changes) } };
     };

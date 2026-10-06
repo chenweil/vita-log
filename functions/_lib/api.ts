@@ -1,6 +1,8 @@
 import { isRecord } from '../../src/domain';
 import type { OwnerEnv } from './owner-credentials';
-import type { D1DatabaseLike } from './d1-store';
+import { D1NotInitializedError, D1UnavailableError, HealthStateVersionConflict, type D1DatabaseLike } from './d1-store';
+import { MigrationConflictError } from './migration';
+import { SessionStoreError } from './session';
 
 /**
  * Shared request handling for the Pages Functions routes.
@@ -28,6 +30,29 @@ export class ApiError extends Error {
 export const unauthorized = (message: string, status = 401): ApiError => new ApiError('unauthorized', message, status);
 export const validationFailed = (message: string, status = 400): ApiError => new ApiError('validation-failed', message, status);
 export const versionConflict = (message: string): ApiError => new ApiError('version-conflict', message, 409);
+
+/**
+ * Map every thrown failure onto one of the stable codes, with a no-store body.
+ *
+ * Shared by every write route so that "database is down" cannot mean one status
+ * on the save path and another on the migration path. The order is
+ * load-bearing: the specific store errors are matched before the generic
+ * `Error` fallback, which reports an unrecognized payload as `validation-failed`
+ * with the input preserved — never as a success, and never as empty data.
+ */
+export async function guardApiErrors(run: () => Promise<Response>): Promise<Response> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof ApiError) return noStore({ code: error.code, message: error.message }, error.status);
+    if (error instanceof MigrationConflictError) return noStore({ code: 'migration-conflict', message: error.message }, 409);
+    if (error instanceof D1NotInitializedError) return noStore({ code: 'database-unavailable', message: error.message }, 503);
+    if (error instanceof HealthStateVersionConflict) return noStore({ code: 'version-conflict', message: error.message }, 409);
+    if (error instanceof D1UnavailableError) return noStore({ code: 'database-unavailable', message: error.message }, 503);
+    if (error instanceof SessionStoreError) return noStore({ code: 'database-unavailable', message: '健康数据服务暂时不可用，请稍后重试' }, 503);
+    return noStore({ code: 'validation-failed', message: '健康数据校验失败，未提交输入已保留' }, 400);
+  }
+}
 
 /** The subset of the Pages Functions context these routes read. */
 export interface FunctionContext {

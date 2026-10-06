@@ -5,8 +5,11 @@
 --
 -- 06.1-02a added the owner session table and the versioned write below. The
 -- one-time import of the local SQLite snapshot is 06.1-03, which additionally
--- owns the "database must be empty before first import" guard. No row in
--- health_state is ever created through the public API.
+-- owns the "database must be empty before first import" guard. That guard is
+-- part of its INSERT statement (`... WHERE NOT EXISTS (SELECT 1 FROM
+-- health_state)`), not a check that runs before it, so two concurrent first
+-- imports cannot both report success. No row in health_state is ever created
+-- through the daily-save route.
 --
 -- No PRAGMA here on purpose. D1 only supports table_list, table_info and
 -- foreign_keys; every other PRAGMA is rejected, so the local SQLite schema's
