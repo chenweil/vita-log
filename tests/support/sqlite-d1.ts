@@ -90,9 +90,16 @@ export class SqliteD1 implements D1DatabaseLike {
       // would also swallow the session insert, and the request would then be
       // refused as unauthenticated — passing for the wrong reason.
       if (behaviour && 'silentWrites' in behaviour && /UPDATE health_state/.test(query)) return { meta: {} };
-      // Same reasoning for the migration's own INSERT: D1 is allowed to report
-      // no change count at all, and the code has to refuse rather than assume.
-      if (behaviour && 'silentInsert' in behaviour && /INSERT INTO health_state/.test(query)) return { meta: {} };
+      // Same reasoning for the migration's own INSERT: the result contract can
+      // be violated, and the code has to refuse rather than assume. This one
+      // EXECUTES the statement and then withholds its metadata — modelling
+      // "the write landed but nothing was reported", which is strictly harder
+      // than skipping the write. A fake that merely skipped the INSERT would
+      // leave the row absent and so prove nothing about this case.
+      if (behaviour && 'silentInsert' in behaviour && /INSERT INTO health_state/.test(query)) {
+        db.prepare(query).run(...(bound as never[]));
+        return { meta: {} };
+      }
       // node:sqlite reports the same change count D1 puts in `meta`.
       return { meta: { changes: Number(db.prepare(query).run(...(bound as never[])).changes) } };
     };

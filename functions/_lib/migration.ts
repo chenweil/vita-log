@@ -217,11 +217,15 @@ export async function previewMigration(
  *   never read, so its failure cannot invalidate a completed import and is not
  *   allowed to report one.
  *
- * The consequence is the property this ticket promises, and it is exact rather
- * than approximate: **every error this function returns is raised before the
- * live row exists.** A caller that receives a non-2xx from a migration can rely
- * on the current D1 snapshot being untouched, and there is no partial-import
- * state for a retry to trip over.
+ * The consequence is the property this ticket promises, and it holds exactly for
+ * the outcomes Cloudflare documents: **every error this function returns is
+ * raised before the live row exists** — an invalid payload, a failed staged
+ * write, a reconciliation mismatch, a stale preview, a guard miss, or a
+ * statement that threw. There is no partial-import state for a retry to trip
+ * over.
+ *
+ * The one documented-contract violation left outside that property is an
+ * INSERT that executes but reports no `meta.changes`; see the note at the check.
  */
 export async function commitMigration(
   db: D1DatabaseLike | undefined,
@@ -267,9 +271,18 @@ export async function commitMigration(
   }
 
   if (changes === 0) throw new MigrationConflictError('D1 已有健康数据，已拒绝迁移；本导入不会覆盖线上数据');
-  // An unreported change count is not a successful import, for the same reason
-  // the save path refuses one: claiming success would tell the owner their data
-  // is online when it may not be.
+  // An unreported change count is not a successful import. D1's documented
+  // result contract requires `meta.changes`, so a statement that runs without
+  // throwing but reports nothing violates that contract — and this is the one
+  // case where the "no error after the live row exists" property cannot be
+  // asserted, because the write may already have landed.
+  //
+  // It is not defended against by re-reading the row: that would put code after
+  // the commit point, which is the structure the post-promotion re-read was
+  // deleted for. Claiming success on an unreported result instead would be
+  // worse — it could report an import that never happened. Refusing is the
+  // safer of the two, and the platform contract is what keeps the case out of
+  // production.
   if (changes === undefined) throw new D1UnavailableError('D1 未返回迁移结果');
 
   // Past the commit point. The import has succeeded; the rest is housekeeping

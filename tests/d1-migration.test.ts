@@ -615,15 +615,28 @@ describe('确认与原子性', () => {
     }
   });
 
-  it('D1 不返回写入结果时迁移不报成功', async () => {
-    // D1 reporting no change count is not a successful import. Silencing only
-    // the migration INSERT keeps the session lookup working, so this reaches the
-    // migration code instead of being refused at the door as unauthenticated.
+  it('D1 违反结果契约（执行了写入却不返回变更数）：迁移不报成功，且此项为已知边界', async () => {
+    // Cloudflare's documented D1 result contract requires `meta.changes`, so
+    // this outcome should not occur. The fake is deliberately faithful rather
+    // than convenient: it EXECUTES the INSERT and then withholds the metadata,
+    // which is the only version of this case worth testing. An earlier fake
+    // skipped the write, which left the row absent and so appeared to satisfy
+    // the blanket guarantee below while proving nothing about it.
     const db = new SqliteD1({ silentInsert: true });
     const cookie = await login(db);
+
     const response = await migrate(db, sampleSnapshot(), cookie);
+    // What IS guaranteed even here: the migration does not claim success.
     expect(response.status).toBe(503);
     expect((await response.json() as { message: string }).message).toContain('未返回迁移结果');
+
+    // And what is NOT: the write did land, so a 503 can follow a committed row.
+    // This assertion records the boundary rather than blessing it. The ticket's
+    // guarantee is scoped to the outcomes Cloudflare documents; an unreported
+    // result is explicitly outside it, because resolving it would mean running
+    // code after the commit point — the very structure the post-promotion
+    // re-read was deleted for.
+    expect(db.storedVersion()).toBe(1);
     db.close();
   });
 
