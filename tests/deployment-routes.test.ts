@@ -46,7 +46,7 @@ const apiLiterals = (source: string): string[] => [...new Set(
 
 describe('部署路由与浏览器适配器一致', () => {
   it('Pages Functions 暴露的 API 路由就是文件列表', () => {
-    expect([...deployedRoutes()].sort()).toEqual(['/api/login', '/api/logout', '/api/session', '/api/snapshot']);
+    expect([...deployedRoutes()].sort()).toEqual(['/api/login', '/api/logout', '/api/owner-snapshot', '/api/session', '/api/snapshot']);
   });
 
   it('D1 适配器请求的每个 URL 都真实存在', () => {

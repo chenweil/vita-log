@@ -86,6 +86,20 @@ export async function readHealthState(db: D1DatabaseLike | undefined): Promise<H
   return decodeSnapshot(row.payload);
 }
 
+/** Read payload and its concurrency version from the same D1 row/query. */
+export async function readOwnerHealthState(db: D1DatabaseLike | undefined): Promise<{ snapshot: HealthSnapshot; version: number }> {
+  if (!db) throw new D1UnavailableError('D1 数据库绑定缺失');
+  let row: Record<string, unknown> | null;
+  try {
+    row = await db.prepare('SELECT payload, version FROM health_state WHERE id = ?').bind(1).first<Record<string, unknown>>();
+  } catch (error) {
+    throw new D1UnavailableError('D1 数据库查询失败', { cause: error });
+  }
+  if (!row) throw new D1NotInitializedError('D1 尚未导入健康数据，请等待本人完成首次迁移');
+  if (!Number.isSafeInteger(row.version) || Number(row.version) < 0) throw new D1UnavailableError('D1 健康数据版本无效');
+  return { snapshot: decodeSnapshot(row.payload), version: Number(row.version) };
+}
+
 function decodeSnapshot(payload: unknown): HealthSnapshot {
   if (typeof payload !== 'string' || payload.length === 0) {
     throw new D1UnavailableError('D1 健康数据载荷缺失');

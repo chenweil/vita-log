@@ -1,4 +1,4 @@
-import { type HealthSnapshot } from './domain';
+import { normalizeSnapshot, type HealthSnapshot } from './domain';
 import { parsePublicSnapshot, toHealthSnapshot } from './public-snapshot';
 import { StorageError, type HealthDataRepository, type LoadResult } from './storage';
 
@@ -20,68 +20,76 @@ const SERVER_ERROR_CODES = new Set<StorageError['code']>([
  * visitor having no health data at all.
  */
 export class D1HealthRepository implements HealthDataRepository {
-  private version = 0;
+  private version: number | null = null;
   constructor(private readonly client: Fetcher = window) {}
 
   async load(): Promise<LoadResult> {
-    let response: Response;
-    try {
-      response = await this.client.fetch('/api/snapshot', { credentials: 'same-origin', cache: 'no-store' });
-    } catch (error) {
-      throw new StorageError('database-unavailable', '健康数据服务暂时不可用，请稍后重试', { cause: error });
+    // A failed reload must never leave an earlier editing version usable.
+    this.version = null;
+    const owner = await this.request('/api/owner-snapshot');
+    if (owner.ok) {
+      try {
+        const data = await owner.json() as { snapshot: unknown; version: unknown };
+        if (!Number.isSafeInteger(data.version) || Number(data.version) < 0) throw new Error('Invalid version');
+        const snapshot = normalizeSnapshot(data.snapshot);
+        this.version = Number(data.version);
+        return { snapshot, status: 'loaded' };
+      } catch (error) {
+        throw new StorageError('database-unavailable', '健康数据服务返回了无法识别的内容，请稍后重试', { cause: error });
+      }
     }
-
+    // Only an explicitly absent/expired session selects the public projection.
+    // An outage or malformed owner response cannot silently downgrade the read.
+    if (owner.status !== 401) throw await this.errorFrom(owner);
+    const response = await this.request('/api/snapshot');
     if (!response.ok) throw await this.errorFrom(response);
-
-    const raw = await response.text();
     try {
-      return { snapshot: toHealthSnapshot(parsePublicSnapshot(raw)), status: 'loaded' };
+      return { snapshot: toHealthSnapshot(parsePublicSnapshot(await response.text())), status: 'loaded' };
     } catch (error) {
       throw new StorageError('database-unavailable', '健康数据服务返回了无法识别的内容，请稍后重试', { cause: error });
     }
   }
 
-  /**
-   * Save a versioned snapshot through the owner's server session.
-   *
-   * The version is read from the session endpoint rather than from `load()`:
-   * the public projection leaves it out on purpose, as internal storage
-   * metadata, so an editing client has to ask for it where the request is
-   * already authenticated. Reading it immediately before the write is also
-   * what makes the conflict real — two tabs saving at once, one of them losing.
-   *
-   * Nothing local is discarded when the save is refused. A `version-conflict`
-   * propagates with the server's own wording so the page can keep the owner's
-   * unsubmitted input on screen and ask them to reload before retrying.
+  /** Save against the version of the complete snapshot last loaded or saved.
+   * Session checks cannot advance this version: stale input remains stale until reload.
+   * Public projections cannot be saved because they omit owner-only settings.
    */
   async commit(snapshot: HealthSnapshot): Promise<void> {
-    const session = await this.session();
-    if (!session.loggedIn) throw new StorageError('unauthorized', '编辑会话已失效，请重新登录');
-
+    if (!await this.session()) throw new StorageError('unauthorized', '编辑会话已失效，请重新登录');
+    if (this.version === null) throw new StorageError('version-conflict', '请重新加载完整编辑快照；未提交输入已保留');
+    const expectedVersion = this.version;
     let response: Response;
     try {
       response = await this.client.fetch('/api/snapshot', {
-        method: 'PUT',
-        credentials: 'same-origin',
+        method: 'PUT', credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ snapshot, expectedVersion: session.version }),
+        body: JSON.stringify({ snapshot, expectedVersion }),
       });
     } catch (error) {
       throw new StorageError('database-unavailable', '健康数据服务暂时不可用，请稍后重试', { cause: error });
     }
-
     if (!response.ok) throw await this.errorFrom(response);
-
     try {
       const saved = await response.json() as { version?: unknown };
-      this.version = Number.isSafeInteger(saved.version) ? Number(saved.version) : session.version;
+      if (saved.version !== expectedVersion + 1) throw new Error('Invalid saved version');
+      this.version = Number(saved.version);
     } catch (error) {
-      throw new StorageError('database-unavailable', '健康数据服务返回了无法识别的内容，请稍后重试', { cause: error });
+      // The write may have landed: reload before another save rather than guessing.
+      this.version = null;
+      throw new StorageError('database-unavailable', '健康数据服务返回了无法识别的内容，请重新加载', { cause: error });
+    }
+  }
+
+  private async request(path: string): Promise<Response> {
+    try {
+      return await this.client.fetch(path, { credentials: 'same-origin', cache: 'no-store' });
+    } catch (error) {
+      throw new StorageError('database-unavailable', '健康数据服务暂时不可用，请稍后重试', { cause: error });
     }
   }
 
   /** The version last seen or last written, for a caller that wants to inspect it. */
-  get currentVersion(): number {
+  get currentVersion(): number | null {
     return this.version;
   }
 
@@ -89,25 +97,13 @@ export class D1HealthRepository implements HealthDataRepository {
     throw new StorageError('recovery-unavailable', '公开读取模式没有恢复快照');
   }
 
-  /**
-   * Ask the server whether this browser still holds an editing session, and
-   * for the version its next write must carry.
-   */
-  private async session(): Promise<{ loggedIn: boolean; version: number }> {
-    let response: Response;
-    try {
-      response = await this.client.fetch('/api/session', { credentials: 'same-origin', cache: 'no-store' });
-    } catch (error) {
-      throw new StorageError('database-unavailable', '健康数据服务暂时不可用，请稍后重试', { cause: error });
-    }
+  /** Check authorization only; session metadata must never refresh a stale version. */
+  private async session(): Promise<boolean> {
+    const response = await this.request('/api/session');
     if (!response.ok) throw await this.errorFrom(response);
     try {
-      const state = await response.json() as { loggedIn?: unknown; version?: unknown };
-      const version = Number(state.version);
-      return {
-        loggedIn: state.loggedIn === true,
-        version: Number.isSafeInteger(version) && version >= 0 ? version : this.version,
-      };
+      const state = await response.json() as { loggedIn?: unknown };
+      return state.loggedIn === true;
     } catch (error) {
       throw new StorageError('database-unavailable', '健康数据服务返回了无法识别的内容，请稍后重试', { cause: error });
     }

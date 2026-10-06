@@ -25,10 +25,9 @@ const TOO_MANY_ATTEMPTS = '尝试次数过多，请一分钟后重试';
 /**
  * Report the live session, if any. Reveals no credential material.
  *
- * `version` rides along so the owner can save without a second round trip: the
- * public projection deliberately omits it as internal storage metadata, so the
- * authenticated response is where an editing client learns the value its
- * `expectedVersion` must carry. It is a monotonic counter, never health data.
+ * `version` is retained as session metadata for existing callers. It cannot
+ * authorize an editing snapshot: the editor gets payload and version together
+ * from /api/owner-snapshot, then retains that version until save or reload.
  *
  * A session store that cannot answer is a 503 rather than "logged out", so the
  * page can say the service is unavailable instead of quietly dropping the

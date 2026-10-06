@@ -6,7 +6,7 @@ import { StorageError } from '../src/storage';
 
 class FakeClient {
   calls: Array<{ input: string; init?: RequestInit }> = [];
-  responses: Response[] = [];
+  responses: Response[] = [Response.json({ code: 'unauthorized' }, { status: 401 })];
   private offline = false;
   failNext(): void { this.offline = true; }
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -44,7 +44,7 @@ describe('D1 公开读取浏览器适配器', () => {
     const client = new FakeClient();
     client.responses.push(ok());
     await new D1HealthRepository(client).load();
-    expect(client.calls[0].input).toBe('/api/snapshot');
+    expect(client.calls.map(call => call.input)).toEqual(['/api/owner-snapshot', '/api/snapshot']);
     expect(client.calls[0].init?.credentials).toBe('same-origin');
     expect(client.calls[0].init?.cache).toBe('no-store');
     expect(client.calls[0].init?.method ?? 'GET').toBe('GET');
@@ -95,11 +95,11 @@ describe('D1 公开读取浏览器适配器', () => {
     expect(error?.message).toBe('健康数据服务暂时不可用，请稍后重试');
   });
 
-  it('读取路径不发起第二个请求（不回退到本机存储）', async () => {
+  it('匿名读取仅探测编辑权限和公开投影，不回退本机存储', async () => {
     const client = new FakeClient();
     client.responses.push(ok());
     await new D1HealthRepository(client).load();
-    expect(client.calls).toHaveLength(1);
+    expect(client.calls).toHaveLength(2);
   });
 
   it('公开读取阶段不提供写入与恢复能力', async () => {

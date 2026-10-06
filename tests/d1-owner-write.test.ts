@@ -1,6 +1,8 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { createEmptySnapshot, type HealthSnapshot } from '../src/domain';
-import { onRequestPut } from '../functions/api/snapshot';
+import { onRequest as onOwnerSnapshotRequest } from '../functions/api/owner-snapshot';
+import { D1HealthRepository } from '../src/d1-storage';
+import { onRequest as onSnapshotRequest, onRequestPut } from '../functions/api/snapshot';
 import { onRequest as onSessionRequest } from '../functions/api/session';
 import { createOwnerCredential, type OwnerEnv } from '../functions/_lib/owner-credentials';
 import { clearRateLimits } from '../functions/_lib/rate-limit';
@@ -81,7 +83,138 @@ const attemptLogin = (db: D1DatabaseLike | undefined, password: string, ip?: str
 beforeEach(() => { clearRateLimits(); });
 afterEach(() => { vi.useRealTimers(); });
 
+/** Browser transport only: routing, cookies and browser-controlled headers.
+ * Database queries, authorization and snapshot/version handling stay in production code.
+ */
+const browserClient = (db: SqliteD1, cookie: string) => ({
+  async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const path = String(input);
+    const headers = new Headers(init?.headers);
+    headers.set('cookie', cookie.split(';')[0]!);
+    headers.set('host', HOST);
+    if (init?.method && init.method !== 'GET') headers.set('origin', ORIGIN);
+    const context = { request: new Request(`${ORIGIN}${path}`, { ...init, headers }), env: ownerEnv({ VITA_LOG_DB: db }) };
+    if (path === '/api/session') return onSessionRequest(context);
+    if (path === '/api/snapshot') return onSnapshotRequest(context);
+    if (path === '/api/owner-snapshot') return onOwnerSnapshotRequest(context);
+    throw new Error(`Unexpected browser route: ${path}`);
+  },
+});
+
 describe('D1 owner 写入授权契约', () => {
+  it('真实客户端两页签依次保存：旧快照冲突，重载后才能再保存', async () => {
+    const db = snapshotRow(createEmptySnapshot(), 4);
+    try {
+      const cookie = await login(db);
+      const a = new D1HealthRepository(browserClient(db, cookie));
+      const b = new D1HealthRepository(browserClient(db, cookie));
+      const first = (await a.load()).snapshot;
+      const stale = (await b.load()).snapshot;
+      first.settings.name = 'A 的新昵称';
+      await a.commit(first);
+      stale.settings.age = 42;
+      await expect(b.commit(stale)).rejects.toMatchObject({ code: 'version-conflict' });
+      expect(db.storedName()).toBe('A 的新昵称');
+      expect(db.storedVersion()).toBe(5);
+      expect(stale.settings.age).toBe(42);
+      // Retrying cannot refresh the version behind the stale input's back.
+      await expect(b.commit(stale)).rejects.toMatchObject({ code: 'version-conflict' });
+      const fresh = (await b.load()).snapshot;
+      fresh.settings.age = 42;
+      await b.commit(fresh);
+      expect(db.storedVersion()).toBe(6);
+      expect(db.storedName()).toBe('A 的新昵称');
+      fresh.settings.age = 43;
+      await b.commit(fresh);
+      expect(db.storedVersion()).toBe(7);
+    } finally { db.close(); }
+  });
+
+  it('真实客户端普通保存保留导入的未公开颜色设置', async () => {
+    const original = createEmptySnapshot();
+    original.settings.primaryColor = '#123456';
+    original.settings.accentColor = '#654321';
+    const db = snapshotRow(original, 4);
+    try {
+      const repository = new D1HealthRepository(browserClient(db, await login(db)));
+      const loaded = (await repository.load()).snapshot;
+      loaded.settings.name = '只改昵称';
+      await repository.commit(loaded);
+      const row = db.db.prepare('SELECT payload FROM health_state WHERE id = 1').get() as { payload: string };
+      const saved = JSON.parse(row.payload) as HealthSnapshot;
+      expect(saved.settings).toMatchObject({ primaryColor: '#123456', accentColor: '#654321', name: '只改昵称' });
+      const publicResponse = await onSnapshotRequest({ request: new Request(`${ORIGIN}/api/snapshot`), env: ownerEnv({ VITA_LOG_DB: db }) });
+      const publicBody = await publicResponse.text();
+      expect(publicBody).not.toContain('primaryColor');
+      expect(publicBody).not.toContain('accentColor');
+      expect(publicBody).not.toContain('"version"');
+    } finally { db.close(); }
+  });
+
+  it('完整编辑读取拒绝匿名、伪造、到期和已撤销会话，不查询健康数据', async () => {
+    const db = snapshotRow(createEmptySnapshot(), 4);
+    try {
+      const active = await login(db);
+      const expired = await login(db);
+      // Expire just that session through real SQL.
+      const { hashSessionToken } = await import('../functions/_lib/session');
+      await db.prepare('UPDATE owner_session SET expires_at = ? WHERE token_hash = ?').bind(0, await hashSessionToken(expired.split(';')[0]!.split('=')[1]!)).run();
+      await sessionRequest(db, { method: 'DELETE', headers: { cookie: active } });
+      for (const cookie of ['', 'vita-log-session=forged', expired, active]) {
+        const before = db.queries.length;
+        const response = await browserClient(db, cookie).fetch('/api/owner-snapshot');
+        expect(response.status).toBe(401);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        expect(await response.json()).toEqual({ code: 'unauthorized', message: '编辑会话已失效，请重新登录' });
+        expect(db.queries.slice(before).some(query => query.includes('health_state'))).toBe(false);
+      }
+    } finally { db.close(); }
+  });
+
+  it('完整编辑读取只接受 GET，失败不暴露快照', async () => {
+    for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
+      const response = await onOwnerSnapshotRequest({ request: new Request(`${ORIGIN}/api/owner-snapshot`, { method }), env: ownerEnv() });
+      expect(response.status).toBe(405);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toMatchObject({ code: 'validation-failed' });
+    }
+  });
+
+  it('完整编辑读取在会话库故障、空库或损坏载荷时 fail-closed', async () => {
+    const db = snapshotRow(createEmptySnapshot(), 4);
+    const broken = new SqliteD1({ error: new Error('D1 unavailable') });
+    try {
+      const cookie = await login(db);
+      const failed = await browserClient(broken, cookie).fetch('/api/owner-snapshot');
+      expect(failed.status).toBe(503);
+      expect(await failed.json()).toMatchObject({ code: 'database-unavailable' });
+      db.db.exec('DELETE FROM health_state');
+      const empty = await browserClient(db, cookie).fetch('/api/owner-snapshot');
+      expect(empty.status).toBe(503);
+      expect(await empty.json()).toMatchObject({ code: 'database-unavailable', message: expect.stringContaining('尚未导入') });
+      db.seed('not-json', 4);
+      const corrupt = await browserClient(db, cookie).fetch('/api/owner-snapshot');
+      expect(corrupt.status).toBe(503);
+      expect(await corrupt.json()).toMatchObject({ code: 'database-unavailable' });
+    } finally { db.close(); broken.close(); }
+  });
+
+  it('匿名投影在登录后不能直接保存，必须重载完整快照', async () => {
+    const db = snapshotRow(createEmptySnapshot(), 4);
+    try {
+      let cookie = '';
+      const client = { fetch: (input: RequestInfo | URL, init?: RequestInit) => browserClient(db, cookie).fetch(input, init) };
+      const repository = new D1HealthRepository(client);
+      const anonymous = (await repository.load()).snapshot;
+      cookie = await login(db);
+      await expect(repository.commit(anonymous)).rejects.toMatchObject({ code: 'version-conflict' });
+      expect(db.storedVersion()).toBe(4);
+      const complete = (await repository.load()).snapshot;
+      await repository.commit(complete);
+      expect(db.storedVersion()).toBe(5);
+    } finally { db.close(); }
+  });
+
   it('未登录写入被拒绝', async () => {
     const db = snapshotRow(createEmptySnapshot(), 3);
     const response = await callPut(db, { snapshot: createEmptySnapshot(), expectedVersion: 3 });
