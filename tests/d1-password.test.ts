@@ -132,11 +132,16 @@ describe('PBKDF2 密码原语', () => {
     }
   });
 
-  it('常量时间比较会检查每一个字节，而不是在首个差异处返回', async () => {
-    // A digest that differs only in its first byte and one that differs only in
-    // its last must both be rejected. An implementation that returned as soon as
-    // it found a mismatch would accept the second one only by accident of
-    // ordering, so the last-byte case is what actually pins "no early exit".
+  it('比较覆盖整个摘要：任何位置被篡改都会被拒绝', async () => {
+    // What this pins: the comparison actually inspects every byte, so a
+    // comparator that only looked at a prefix, or at the length, could not pass.
+    //
+    // What it does NOT pin, despite the obvious name it used to carry: the
+    // absence of an early exit. Flipping the last byte is rejected by an
+    // early-exit comparator too — it just gets there sooner. The two differ in
+    // timing, not in result, and no functional test can tell them apart. That
+    // property lives in the XOR accumulator below, which the source check at the
+    // end of this block guards; a timing test would be measuring the JIT.
     const credential = parseCredential(await createCredential('compare every byte', fixedRandom(0x99)))!;
     const baseline = Buffer.from(await derivePassword('compare every byte', credential.salt, credential.iterations));
 
@@ -147,6 +152,22 @@ describe('PBKDF2 密码原语', () => {
     }
     // A length mismatch is rejected too, rather than comparing a prefix.
     expect(await verifyPassword('compare every byte', { ...credential, digest: credential.digest.slice(1) })).toBe(false);
+
+    // The no-early-exit half, checked against the implementation's own source.
+    // A timing test would be flaky and would mostly measure the JIT; a `break`
+    // or a mid-loop `return` in the accumulator is the defect this is looking
+    // for, and it is a static property.
+    const compare = /function constantTimeEqual[\s\S]*?\n}/.exec(source)?.[0] ?? '';
+    expect(compare, '未找到 constantTimeEqual').not.toBe('');
+    expect(compare, '循环必须走完整个摘要长度').toMatch(/for \([^)]*index < left\.length/);
+    // The guard before the loop is fine — a length mismatch is not a guessable
+    // prefix, it is a malformed record — and so is the function's own trailing
+    // `return`. What must not exist is a way out of the *loop*, so the check is
+    // scoped to the loop statement.
+    const loop = /for \([^)]*\)[\s\S]*?[;}]/.exec(compare)?.[0] ?? '';
+    expect(loop, '未找到比较循环').not.toBe('');
+    expect(loop, '循环内不得 break').not.toMatch(/\bbreak\b/);
+    expect(loop, '循环内不得 return').not.toMatch(/\breturn\b/);
   });
 
   it('不依赖 Node crypto：模块不引入 node:crypto，也不调用 scryptSync', () => {
