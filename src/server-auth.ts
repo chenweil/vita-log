@@ -21,6 +21,7 @@ export class ServerEditorAuth implements EditorAuth {
     private readonly client: Fetcher = window,
     private readonly now: () => number = () => Date.now(),
   ) {}
+  canUnlock(): boolean { return true; }
   isUnlocked(): boolean { return this.unlockedUntil > this.now(); }
   async unlock(username: string, password: string): Promise<boolean> {
     try {

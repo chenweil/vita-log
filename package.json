@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "npm run typecheck && vite build && node scripts/postbuild-fallback.mjs",
     "build:pages": "VITE_BASE=/vita-log/ npm run build",
+    "build:cloudflare": "VITE_STORAGE_MODE=d1 npm run build",
     "preview": "vite preview",
     "sqlite": "tsx server/cli.ts",
     "owner": "tsx server/owner-cli.ts",

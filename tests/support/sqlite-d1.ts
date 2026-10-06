@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import type { D1DatabaseLike, D1Statement } from '../../functions/_lib/d1-store';
@@ -19,8 +20,21 @@ import type { D1DatabaseLike, D1Statement } from '../../functions/_lib/d1-store'
  * tests would keep running against whatever the copy said while the deployment
  * ran the file. Reading the file is what makes "the deployed DDL is covered by
  * every test" true rather than merely intended.
+ *
+ * The path is built from this module's own file URL with `path.resolve` rather
+ * than `new URL('../../functions/schema.sql', import.meta.url)`. Vite rewrites
+ * that inline `new URL(<literal>, import.meta.url)` form into a dev-server
+ * asset URL, so under the jsdom environment — which 06.1-04 needs for the
+ * browser seam — the base came back as `http://localhost:3000/...` and
+ * `fileURLToPath` refused it with "The URL must be of scheme file". The
+ * node-environment suites never saw it, which is exactly the kind of gap that
+ * only shows up once something else starts depending on this module from a
+ * different environment.
  */
-const DEPLOYED_SCHEMA = readFileSync(fileURLToPath(new URL('../../functions/schema.sql', import.meta.url)), 'utf8')
+const DEPLOYED_SCHEMA = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../functions/schema.sql'),
+  'utf8',
+)
   // Strip line comments. This has to happen before the caller splits on `;`,
   // and it happens here so no caller has to remember: the header prose contains
   // semicolons that would otherwise cut a comment in half.

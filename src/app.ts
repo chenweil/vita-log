@@ -45,9 +45,116 @@ interface DietFormState {
 
 type SaveErrorTarget = 'body' | 'step' | 'diet' | 'transfer';
 
+/**
+ * The copy for a read-only panel.
+ *
+ * `canEdit` decides whether "verify your identity to edit" is a route this
+ * deployment can actually offer. Where it cannot, the honest sentence is that
+ * the page is read-only — not the same sentence next to a button that goes
+ * nowhere.
+ */
+const lockedHint = (text: string, canEdit: boolean): string => (canEdit ? text : '当前为纯静态只读页面，没有编辑入口。');
+
 export interface AppMountOptions {
   mode?: 'owner' | 'reader';
   publishedAt?: string;
+  /**
+   * Where the snapshot behind this page lives.
+   *
+   * It changes what the status line is allowed to claim. A D1 outage must not
+   * be reported as "本地数据读取失败" — the page is not reading local data, and
+   * telling a visitor to fix their browser storage would send them somewhere
+   * the fault is not. Conversely the localStorage build must keep saying local,
+   * because there the browser really is the store.
+   */
+  source?: 'browser' | 'server';
+}
+
+/** The copy one storage mode uses for status, errors and read-only panels. */
+interface PageCopy {
+  reading: string;
+  loaded: string;
+  ready: string;
+  saved: string;
+  loadFailed: string;
+  saveFailed: string;
+  errorEyebrow: string;
+  errorTitle: string;
+  errorHint: string;
+  loadingTitle: string;
+  loadingHint: string;
+  readOnlyPill: string;
+  reloadLabel: string;
+  publishHint: string;
+  storageTitle: string;
+  storageBody: string;
+  storageFoot: string;
+  footerTitle: string;
+  footerNote: string;
+}
+
+const COPY: Record<'browser' | 'server', PageCopy> = {
+  browser: {
+    reading: '正在读取本地数据…',
+    loaded: '已从本地快照加载',
+    ready: '本地存储已准备就绪',
+    saved: '已保存本地快照',
+    loadFailed: '本地数据读取失败',
+    saveFailed: '本地数据保存失败',
+    errorEyebrow: 'LOCAL STORAGE · 本地存储',
+    errorTitle: '本地数据暂时不可用',
+    errorHint: '页面没有把异常状态当成空数据。修复浏览器存储后可以重试。',
+    loadingTitle: '正在打开轻盈计划',
+    loadingHint: '正在读取当前浏览器中的健康数据…',
+    readOnlyPill: '只读 · 本地',
+    reloadLabel: '刷新本地数据',
+    publishHint: '发布只会生成一个下载文件，不会自动公开本地变化。将文件部署为 <code>vita-log-publication.json</code>，再以 <code>?publication=vita-log-publication.json</code> 打开分享页面。',
+    storageTitle: '本地数据',
+    storageBody: '当前页面使用浏览器本地快照。第一版不会向腾讯云文档或 Workbuddy 发起请求。',
+    storageFoot: '请定期导出完整备份，避免浏览器数据成为唯一副本。',
+    footerTitle: '独立静态版',
+    footerNote: '数据只保存在当前浏览器',
+  },
+  server: {
+    reading: '正在读取服务端最新数据…',
+    loaded: '已读取服务端最新快照',
+    ready: '服务端快照已就绪',
+    saved: '已保存，访客刷新后即可看到',
+    loadFailed: '健康数据读取失败',
+    saveFailed: '健康数据保存失败',
+    errorEyebrow: 'ONLINE · 在线服务',
+    errorTitle: '健康数据服务暂时不可用',
+    errorHint: '页面没有把服务故障当成空数据，也没有回退到旧缓存或本机数据。服务恢复后可以重试。',
+    loadingTitle: '正在打开轻盈计划',
+    loadingHint: '正在读取服务端当前保存的健康数据…',
+    readOnlyPill: '只读 · 访客',
+    reloadLabel: '刷新最新数据',
+    publishHint: '这是 #06 的非实时分享路径：只会生成一个下载文件，需要自行部署后再用 <code>?publication=…</code> 打开。在线模式本身已经是实时的。',
+    storageTitle: '在线数据',
+    storageBody: '当前页面读取服务端保存的健康数据，每次打开都取最新一次成功保存的快照。',
+    storageFoot: '刷新即可看到本人最近的保存；页面不会回退到旧缓存或本机副本。',
+    footerTitle: '在线版',
+    footerNote: '数据保存在服务端，本页只读取',
+  },
+};
+
+/**
+ * What the page is allowed to show, as one value.
+ *
+ * These three used to travel as loose booleans through five render functions,
+ * which is how a renderer ends up being handed `editing: true` alongside
+ * `canUnlock: false` — a combination that means nothing, because an editor
+ * that cannot be unlocked was never opened. Bundling them makes the caller
+ * state the situation once and keeps the renderers honest about which of the
+ * three they are reading.
+ */
+interface ViewContext {
+  /** The owner holds a live session and the editor is open. */
+  editing: boolean;
+  /** A published, non-realtime snapshot file. */
+  reader: boolean;
+  /** This deployment can ever open an editor at all. */
+  canUnlock: boolean;
 }
 
 const emptyForm = (): BodyFormState => ({ target: null, date: localDate(new Date()), weightKg: '', bodyfatPercent: '', waistCm: '', hipCm: '', note: '', error: '' });
@@ -57,10 +164,32 @@ const DIET_PROMPT = '请根据我提供的餐食照片或商品包装，识别�
 
 export function mountApp(container: HTMLElement, repository: HealthDataRepository, auth: EditorAuth = new ReadOnlyEditorAuth(), options: AppMountOptions = {}): () => void {
   const readerMode = options.mode === 'reader';
-  const canEdit = (): boolean => !readerMode && auth.isUnlocked();
+  const copy = COPY[options.source ?? 'browser'];
+  /**
+   * Set when the server refuses a write as unauthorized.
+   *
+   * The page's own clock is not the only thing that can end a session: the
+   * owner can lock from another device, or the server can drop the row. When
+   * that happens mid-edit the browser still believes it holds a live session
+   * until its own deadline, so without this the page would keep offering an
+   * editor whose every save is refused. The server is the authority here, so
+   * believe it and stop offering.
+   */
+  let sessionRefused = false;
+  /**
+   * True only while re-reading the snapshot under a freshly opened session.
+   *
+   * The reload is what grants editability, so the editor must not be on screen
+   * until it has finished. Without this the page paints the editor over the
+   * snapshot it already had — the anonymous public projection, which carries no
+   * version — and a save typed into that window is refused for having nothing
+   * to write against.
+   */
+  let reloadingForOwner = false;
+  const canEdit = (): boolean => !readerMode && !sessionRefused && !reloadingForOwner && auth.isUnlocked();
   let snapshot: HealthSnapshot | null = null;
   let storageState: StorageViewState = 'saving';
-  let storageMessage = '正在读取本地数据…';
+  let storageMessage = copy.reading;
   let editing = canEdit();
   let authOpen = false;
   let formState = emptyForm();
@@ -74,24 +203,34 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
   let transferMessage = '';
   let publicationMessage = '';
 
+  /**
+   * What to say about the controls this deployment does not have.
+   *
+   * "进入编辑模式后可以…" is only honest where an edit mode exists. The pure
+   * static build has no server to authorize a write, so promising one is a
+   * route that cannot be taken — the visitor would look for a login form that
+   * was never going to appear.
+   */
+  const unavailableHint = (): string => auth.canUnlock()
+    ? '进入本人编辑模式后可以导入备份、历史 CSV 或生成只读发布快照。'
+    : '这是纯静态只读页面：可以查看和导出，但没有任何编辑、导入或清空入口。编辑请前往启用在线服务的部署。';
+
   const render = (): void => {
     if (!snapshot) {
-      container.innerHTML = storageState === 'saving' ? renderLoading() : renderStorageError(storageMessage);
+      container.innerHTML = storageState === 'saving' ? renderLoading(copy) : renderStorageError(copy, storageMessage);
       bindReload(container, load);
       return;
     }
     editing = canEdit();
-    container.innerHTML = renderDashboard(snapshot, storageState, storageMessage, editing, formState, stepForm, dietForm, selectedDate, authOpen, readerMode, options.publishedAt);
-    if (auth instanceof ReadOnlyEditorAuth) {
-      container.querySelectorAll('[data-action="auth-toggle"]').forEach(control => control.remove());
-    }
+    const view: ViewContext = { editing, reader: readerMode, canUnlock: auth.canUnlock() };
+    container.innerHTML = renderDashboard(snapshot, storageState, storageMessage, view, formState, stepForm, dietForm, selectedDate, authOpen, copy, options.publishedAt);
     bindEvents();
     bindDataManager();
   };
 
   const load = async (): Promise<void> => {
     storageState = 'saving';
-    storageMessage = '正在读取本地数据…';
+    storageMessage = copy.reading;
     render();
     try {
       const result = await repository.load();
@@ -99,16 +238,16 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       persistedSnapshot = result.status === 'loaded';
       if (result.status === 'new') {
         storageState = 'saved';
-        storageMessage = '本地存储已准备就绪';
+        storageMessage = copy.ready;
       } else {
         storageState = 'loaded';
-        storageMessage = '已从本地快照加载';
+        storageMessage = copy.loaded;
       }
       void repository.loadRecovery().then(() => { recoveryAvailable = true; if (snapshot) render(); }).catch(() => { recoveryAvailable = false; });
     } catch (error) {
       snapshot = null;
       storageState = 'error';
-      storageMessage = error instanceof StorageError ? error.message : '本地数据读取失败';
+      storageMessage = error instanceof StorageError ? error.message : copy.loadFailed;
     }
     render();
   };
@@ -126,10 +265,13 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       recoveryAvailable = recoveryAvailable || persistedSnapshot;
       persistedSnapshot = true;
       storageState = 'saved';
-      storageMessage = '已保存本地快照';
+      storageMessage = copy.saved;
       return true;
     } catch (error) {
-      const saveError = error instanceof StorageError ? error.message : '本地数据保存失败';
+      const saveError = error instanceof StorageError ? error.message : copy.saveFailed;
+      // The server just told us the session is gone. Stop offering an editor
+      // that cannot write, and let the owner re-authenticate to get it back.
+      if (error instanceof StorageError && error.code === 'unauthorized') sessionRefused = true;
       setSaveError(errorTarget, saveError);
       storageState = 'error';
       storageMessage = saveError;
@@ -308,7 +450,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     }
     const sqlite = repository as HealthDataRepository & { migrate?: (snapshot: HealthSnapshot) => Promise<void>; backup?: () => Promise<string>; restore?: (name: string) => Promise<void> };
     const sqliteActions = sqlite.migrate && editing ? '<button class="text-button" data-action="migrate-sqlite" type="button">迁移浏览器快照到 SQLite</button><button class="text-button" data-action="backup-sqlite" type="button">备份 SQLite 数据库</button><button class="text-button" data-action="restore-sqlite" type="button">恢复 SQLite 备份</button>' : '';
-    main.insertAdjacentHTML('beforeend', `<section class="editor-section data-manager-section"><div class="section-heading"><div><p class="eyebrow">DATA · 数据</p><h2>备份与导入</h2></div><span class="saved-note">JSON 完整备份 · CSV 分类交换</span></div><article class="card data-manager-card"><div class="transfer-actions"><button class="text-button" data-action="export-json" type="button">导出完整 JSON</button><button class="text-button" data-action="export-csv" data-kind="weight" type="button">导出体重 CSV</button><button class="text-button" data-action="export-csv" data-kind="measurement" type="button">导出围度 CSV</button><button class="text-button" data-action="export-csv" data-kind="checkin" type="button">导出打卡 CSV</button><button class="text-button" data-action="export-csv" data-kind="step" type="button">导出步数 CSV</button><button class="text-button" data-action="export-csv" data-kind="diet" type="button">导出饮食 CSV</button>${sqliteActions}${editing ? '<button class="primary-button" data-action="publish" type="button">生成只读发布快照</button>' : ''}</div>${editing ? `<p class="muted">发布只会生成一个下载文件，不会自动公开本地变化。将文件部署为 <code>vita-log-publication.json</code>，再以 <code>?publication=vita-log-publication.json</code> 打开分享页面。</p>` : '<p class="muted">进入本人编辑模式后可以导入备份、历史 CSV 或生成只读发布快照。</p>'}${publicationMessage ? `<p class="saved-note" role="status">${escapeHtml(publicationMessage)}</p>` : ''}${editing ? `<div class="import-controls"><label>导入类型<select id="transferKind"><option value="weight" ${transferKind === 'weight' ? 'selected' : ''}>体重</option><option value="measurement" ${transferKind === 'measurement' ? 'selected' : ''}>围度</option><option value="checkin" ${transferKind === 'checkin' ? 'selected' : ''}>打卡</option><option value="step" ${transferKind === 'step' ? 'selected' : ''}>步数</option><option value="diet" ${transferKind === 'diet' ? 'selected' : ''}>饮食</option></select></label><label class="file-button">选择 JSON/CSV<input id="transferFile" type="file" accept=".json,.csv,application/json,text/csv"></label></div><button class="text-button danger-text" data-action="clear-all" type="button">清空全部记录</button>` : ''}${transferMessage ? `<p class="form-error" role="alert">${escapeHtml(transferMessage)}</p>` : ''}${transferPreview ? renderTransferPreview(transferPreview) : ''}<div class="recovery-row"><span>${recoveryAvailable ? '已有可恢复快照' : '暂无恢复快照'}</span>${editing ? `<button class="text-button" data-action="restore-recovery" type="button" ${recoveryAvailable ? '' : 'disabled'}>恢复上一次快照</button>` : ''}</div></article></section>`);
+    main.insertAdjacentHTML('beforeend', `<section class="editor-section data-manager-section"><div class="section-heading"><div><p class="eyebrow">DATA · 数据</p><h2>备份与导入</h2></div><span class="saved-note">JSON 完整备份 · CSV 分类交换</span></div><article class="card data-manager-card"><div class="transfer-actions"><button class="text-button" data-action="export-json" type="button">导出完整 JSON</button><button class="text-button" data-action="export-csv" data-kind="weight" type="button">导出体重 CSV</button><button class="text-button" data-action="export-csv" data-kind="measurement" type="button">导出围度 CSV</button><button class="text-button" data-action="export-csv" data-kind="checkin" type="button">导出打卡 CSV</button><button class="text-button" data-action="export-csv" data-kind="step" type="button">导出步数 CSV</button><button class="text-button" data-action="export-csv" data-kind="diet" type="button">导出饮食 CSV</button>${sqliteActions}${editing ? '<button class="primary-button" data-action="publish" type="button">生成只读发布快照</button>' : ''}</div>${editing ? `<p class="muted">${copy.publishHint}</p>` : `<p class="muted">${unavailableHint()}</p>`}${publicationMessage ? `<p class="saved-note" role="status">${escapeHtml(publicationMessage)}</p>` : ''}${editing ? `<div class="import-controls"><label>导入类型<select id="transferKind"><option value="weight" ${transferKind === 'weight' ? 'selected' : ''}>体重</option><option value="measurement" ${transferKind === 'measurement' ? 'selected' : ''}>围度</option><option value="checkin" ${transferKind === 'checkin' ? 'selected' : ''}>打卡</option><option value="step" ${transferKind === 'step' ? 'selected' : ''}>步数</option><option value="diet" ${transferKind === 'diet' ? 'selected' : ''}>饮食</option></select></label><label class="file-button">选择 JSON/CSV<input id="transferFile" type="file" accept=".json,.csv,application/json,text/csv"></label></div><button class="text-button danger-text" data-action="clear-all" type="button">清空全部记录</button>` : ''}${transferMessage ? `<p class="form-error" role="alert">${escapeHtml(transferMessage)}</p>` : ''}${transferPreview ? renderTransferPreview(transferPreview) : ''}<div class="recovery-row"><span>${recoveryAvailable ? '已有可恢复快照' : '暂无恢复快照'}</span>${editing ? `<button class="text-button" data-action="restore-recovery" type="button" ${recoveryAvailable ? '' : 'disabled'}>恢复上一次快照</button>` : ''}</div></article></section>`);
   };
 
   const bindDataManager = (): void => {
@@ -428,8 +570,24 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       event.preventDefault();
       const data = new FormData(form);
       const ok = await auth.unlock(String(data.get('username') ?? ''), String(data.get('password') ?? ''));
-      if (ok) { authOpen = false; editing = true; formState.error = ''; }
-      else formState.error = '账号或密码错误，未进入编辑模式';
+      if (!ok) { formState.error = '账号或密码错误，未进入编辑模式'; render(); return; }
+      authOpen = false;
+      formState.error = '';
+      // A fresh login clears a previous server-side refusal; the reload below is
+      // what actually re-establishes editability, and it would be refused
+      // against the old session anyway.
+      sessionRefused = false;
+      // Reload before opening the editor. What is on screen was fetched
+      // anonymously, so it is the public projection: no version to save
+      // against, and the owner-only settings it omits. Editing it would fail
+      // on the first save (or silently drop settings), so the reload is what
+      // actually grants editability — not the flag below.
+      reloadingForOwner = true;
+      try { await load(); } finally { reloadingForOwner = false; }
+      // A reload that failed leaves no snapshot and the error screen up. Do
+      // not paint an editor over an unknown state.
+      if (!snapshot) return;
+      editing = canEdit();
       render();
     }));
     container.querySelectorAll<HTMLFormElement>('#bodyRecordForm').forEach((form) => form.addEventListener('submit', (event) => { void submitBodyForm(event); }));
@@ -454,7 +612,8 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
   return () => window.clearInterval(expiryTimer);
 }
 
-function renderDashboard(snapshot: HealthSnapshot, state: StorageViewState, message: string, editing: boolean, formState: BodyFormState, stepForm: StepFormState, dietForm: DietFormState, selectedDate: string, authOpen: boolean, readerMode = false, publishedAt?: string): string {
+function renderDashboard(snapshot: HealthSnapshot, state: StorageViewState, message: string, view: ViewContext, formState: BodyFormState, stepForm: StepFormState, dietForm: DietFormState, selectedDate: string, authOpen: boolean, copy: PageCopy, publishedAt?: string): string {
+  const { editing, reader: readerMode, canUnlock } = view;
   const latestWeight = latestByDate(snapshot.weights);
   const latestMeasurement = latestByDate(snapshot.measurements);
   const bmi = latestWeight ? calculateBmi(latestWeight.weightKg, snapshot.settings.heightCm) : null;
@@ -465,9 +624,9 @@ function renderDashboard(snapshot: HealthSnapshot, state: StorageViewState, mess
   const goalProgress = latestWeight ? progressPercent(latestWeight.weightKg, snapshot.settings.startWeightKg, snapshot.settings.targetWeightKg) : 0;
   const greeting = snapshot.settings.name ? `${snapshot.settings.name}，今天也稳稳向前。` : '今天也稳稳向前。';
   const bodyStatus = renderBodyStatus(snapshot, whr, goalProgress, todayDiet);
-  const topActions = readerMode ? '<span class="read-only-pill"><span class="status-dot"></span>只读 · 已发布</span><button class="icon-button" data-action="reload" aria-label="刷新发布快照" title="刷新发布快照">↻</button>' : `<span class="read-only-pill"><span class="status-dot"></span>${editing ? '本人编辑' : '只读 · 本地'}</span><button class="auth-button" data-action="auth-toggle" type="button">${editing ? '锁定' : '进入编辑'}</button><button class="icon-button" data-action="reload" aria-label="刷新本地数据" title="刷新本地数据">↻</button>`;
+  const topActions = readerMode ? '<span class="read-only-pill"><span class="status-dot"></span>只读 · 已发布</span><button class="icon-button" data-action="reload" aria-label="刷新发布快照" title="刷新发布快照">↻</button>' : `<span class="read-only-pill"><span class="status-dot"></span>${editing ? '本人编辑' : copy.readOnlyPill}</span>${canUnlock ? `<button class="auth-button" data-action="auth-toggle" type="button">${editing ? '锁定' : '进入编辑'}</button>` : ''}<button class="icon-button" data-action="reload" aria-label="${escapeHtml(copy.reloadLabel)}" title="${escapeHtml(copy.reloadLabel)}">↻</button>`;
   const publicationBanner = readerMode ? `<section class="card publication-banner"><strong>只读发布快照</strong><span>数据发布时间：${escapeHtml(publishedAt ? formatPublicationDate(publishedAt) : '未知时间')} · 不是实时同步</span></section>` : '';
-  return `<div class="app-shell"><header class="topbar"><div class="brand"><div class="brand-mark">轻</div><div><strong>轻盈计划</strong><span>个人健康记录</span></div></div><div class="top-actions">${topActions}</div></header><main class="page">${publicationBanner}<section class="hero-card"><div><p class="eyebrow">DAILY CHECK-IN · ${escapeHtml(today)}</p><h1>${escapeHtml(greeting)}</h1><p class="hero-copy">把今天的记录留给自己，趋势会替你记住坚持。</p></div><div class="hero-ring" aria-label="目标进度 ${Math.round(goalProgress)}%"><span>${Math.round(goalProgress)}<small>%</small></span><em>目标进度</em></div></section><section class="section-block"><div class="section-heading"><div><p class="eyebrow">OVERVIEW · 概览</p><h2>今天的身体状态</h2></div><span class="saved-note ${state === 'error' ? 'error' : ''}">${escapeHtml(message)}</span></div><div class="metric-grid">${metricCard('当前体重', latestWeight ? `${formatNumber(latestWeight.weightKg)} <small>kg</small>` : '--', latestWeight ? latestWeight.date : '还没有记录', 'primary')}${metricCard('BMI', bmi ? formatNumber(bmi, 1) : '--', bmi ? bmiLabel(bmi) : '记录体重后显示', 'accent')}${metricCard('今日步数', todaySteps ? formatInteger(todaySteps.steps) : '--', todaySteps ? `${todaySteps.steps >= 8000 ? '已达标' : '目标 8000 步'}` : '还没有记录', 'blue')}${metricCard('今日饮食', todayDiet.length ? `${formatInteger(sum(todayDiet, 'calorie'))} <small>kcal</small>` : '--', todayDiet.length ? `${todayDiet.length} 条记录` : '还没有记录', 'amber')}</div>${bodyStatus}</section>${renderEditor(snapshot, editing, formState, readerMode)}${renderDietEditor(snapshot, editing, dietForm, selectedDate, readerMode)}${renderActivityEditor(snapshot, editing, stepForm, readerMode)}<section class="two-column"><article class="card goal-card"><div class="card-heading"><div><p class="eyebrow">GOAL · 目标</p><h2>减脂进度</h2></div><span class="goal-number">${formatNumber(snapshot.settings.targetWeightKg)} <small>kg</small></span></div><div class="progress-track"><span style="width:${Math.min(100, Math.max(0, goalProgress))}%"></span></div><div class="goal-row"><span>起始体重 <b>${formatNumber(snapshot.settings.startWeightKg)} kg</b></span><span>目标体重 <b>${formatNumber(snapshot.settings.targetWeightKg)} kg</b></span></div><div class="detail-list"><div><span>最近围度</span><b>${latestMeasurement ? `${formatNumber(latestMeasurement.waistCm)} / ${formatNumber(latestMeasurement.hipCm)} cm` : '--'}</b></div><div><span>腰臀比 WHR</span><b>${whr ? formatNumber(whr, 2) : '--'}</b></div><div><span>目标体脂</span><b>${formatNumber(snapshot.settings.targetBodyfatPercent, 1)}%</b></div></div></article><article class="card today-card"><div class="card-heading"><div><p class="eyebrow">TODAY · 今日</p><h2>记录状态</h2></div><span class="status-label">${editing ? '本人编辑' : '只读预览'}</span></div>${renderTodayList(snapshot, today)}</article></section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">TREND · 趋势</p><h2>体重趋势</h2></div><span class="chart-meta">${snapshot.weights.length ? `共 ${snapshot.weights.length} 条` : '等待第一条记录'}</span></div>${renderWeightChart(snapshot.weights)}</section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">MEASURE · 围度</p><h2>腰围与臀围趋势</h2></div><span class="chart-meta">${snapshot.measurements.length ? `共 ${snapshot.measurements.length} 条` : '等待第一条记录'}</span></div>${renderMeasurementChart(snapshot.measurements)}</section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">ACTIVITY · 步数</p><h2>步数趋势</h2></div><span class="chart-meta">目标 8000 步</span></div>${renderStepChart(snapshot.steps)}</section><section class="card calendar-card"><div class="card-heading"><div><p class="eyebrow">CALENDAR · 日历</p><h2>最近 7 天</h2></div><span class="chart-meta">体重 · 步数 · 饮食 · 打卡</span></div>${renderCalendar(snapshot, today, selectedDate)}${renderCalendarDetail(snapshot, selectedDate, editing)}</section><section class="two-column lower-grid">${renderSettingsCard(snapshot, editing)}<article class="card backup-card"><div class="card-heading"><div><p class="eyebrow">STORAGE · 存储</p><h2>${readerMode ? '发布数据' : '本地数据'}</h2></div><span class="status-check">✓</span></div><p>${readerMode ? '当前显示的是本人主动发布的只读快照。页面不会向本人的浏览器本地数据写入内容。' : '当前页面使用浏览器本地快照。第一版不会向腾讯云文档或 Workbuddy 发起请求。'}</p><div class="data-count">${snapshot.weights.length + snapshot.measurements.length + snapshot.steps.length + snapshot.checkins.length + snapshot.diets.length}<small> 条记录</small></div><p class="muted">${readerMode ? '数据可能晚于本人最新记录，请以发布时间为准。' : '请定期导出完整备份，避免浏览器数据成为唯一副本。'}</p></article></section></main><footer class="footer">轻盈计划 · 独立静态版 <span>${readerMode ? '只读发布 · 不是实时同步' : '数据只保存在当前浏览器'}</span></footer>${authOpen ? renderAuthModal(formState.error) : ''}</div>`;
+  return `<div class="app-shell"><header class="topbar"><div class="brand"><div class="brand-mark">轻</div><div><strong>轻盈计划</strong><span>个人健康记录</span></div></div><div class="top-actions">${topActions}</div></header><main class="page">${publicationBanner}<section class="hero-card"><div><p class="eyebrow">DAILY CHECK-IN · ${escapeHtml(today)}</p><h1>${escapeHtml(greeting)}</h1><p class="hero-copy">把今天的记录留给自己，趋势会替你记住坚持。</p></div><div class="hero-ring" aria-label="目标进度 ${Math.round(goalProgress)}%"><span>${Math.round(goalProgress)}<small>%</small></span><em>目标进度</em></div></section><section class="section-block"><div class="section-heading"><div><p class="eyebrow">OVERVIEW · 概览</p><h2>今天的身体状态</h2></div><span class="saved-note ${state === 'error' ? 'error' : ''}">${escapeHtml(message)}</span></div><div class="metric-grid">${metricCard('当前体重', latestWeight ? `${formatNumber(latestWeight.weightKg)} <small>kg</small>` : '--', latestWeight ? latestWeight.date : '还没有记录', 'primary')}${metricCard('BMI', bmi ? formatNumber(bmi, 1) : '--', bmi ? bmiLabel(bmi) : '记录体重后显示', 'accent')}${metricCard('今日步数', todaySteps ? formatInteger(todaySteps.steps) : '--', todaySteps ? `${todaySteps.steps >= 8000 ? '已达标' : '目标 8000 步'}` : '还没有记录', 'blue')}${metricCard('今日饮食', todayDiet.length ? `${formatInteger(sum(todayDiet, 'calorie'))} <small>kcal</small>` : '--', todayDiet.length ? `${todayDiet.length} 条记录` : '还没有记录', 'amber')}</div>${bodyStatus}</section>${renderEditor(snapshot, formState, view)}${renderDietEditor(snapshot, dietForm, selectedDate, view)}${renderActivityEditor(snapshot, stepForm, view)}<section class="two-column"><article class="card goal-card"><div class="card-heading"><div><p class="eyebrow">GOAL · 目标</p><h2>减脂进度</h2></div><span class="goal-number">${formatNumber(snapshot.settings.targetWeightKg)} <small>kg</small></span></div><div class="progress-track"><span style="width:${Math.min(100, Math.max(0, goalProgress))}%"></span></div><div class="goal-row"><span>起始体重 <b>${formatNumber(snapshot.settings.startWeightKg)} kg</b></span><span>目标体重 <b>${formatNumber(snapshot.settings.targetWeightKg)} kg</b></span></div><div class="detail-list"><div><span>最近围度</span><b>${latestMeasurement ? `${formatNumber(latestMeasurement.waistCm)} / ${formatNumber(latestMeasurement.hipCm)} cm` : '--'}</b></div><div><span>腰臀比 WHR</span><b>${whr ? formatNumber(whr, 2) : '--'}</b></div><div><span>目标体脂</span><b>${formatNumber(snapshot.settings.targetBodyfatPercent, 1)}%</b></div></div></article><article class="card today-card"><div class="card-heading"><div><p class="eyebrow">TODAY · 今日</p><h2>记录状态</h2></div><span class="status-label">${editing ? '本人编辑' : '只读预览'}</span></div>${renderTodayList(snapshot, today)}</article></section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">TREND · 趋势</p><h2>体重趋势</h2></div><span class="chart-meta">${snapshot.weights.length ? `共 ${snapshot.weights.length} 条` : '等待第一条记录'}</span></div>${renderWeightChart(snapshot.weights)}</section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">MEASURE · 围度</p><h2>腰围与臀围趋势</h2></div><span class="chart-meta">${snapshot.measurements.length ? `共 ${snapshot.measurements.length} 条` : '等待第一条记录'}</span></div>${renderMeasurementChart(snapshot.measurements)}</section><section class="card chart-card"><div class="card-heading"><div><p class="eyebrow">ACTIVITY · 步数</p><h2>步数趋势</h2></div><span class="chart-meta">目标 8000 步</span></div>${renderStepChart(snapshot.steps)}</section><section class="card calendar-card"><div class="card-heading"><div><p class="eyebrow">CALENDAR · 日历</p><h2>最近 7 天</h2></div><span class="chart-meta">体重 · 步数 · 饮食 · 打卡</span></div>${renderCalendar(snapshot, today, selectedDate)}${renderCalendarDetail(snapshot, selectedDate, editing)}</section><section class="two-column lower-grid">${renderSettingsCard(snapshot, view)}<article class="card backup-card"><div class="card-heading"><div><p class="eyebrow">STORAGE · 存储</p><h2>${escapeHtml(readerMode ? '发布数据' : copy.storageTitle)}</h2></div><span class="status-check">✓</span></div><p>${escapeHtml(readerMode ? '当前显示的是本人主动发布的只读快照。页面不会向本人的浏览器本地数据写入内容。' : copy.storageBody)}</p><div class="data-count">${snapshot.weights.length + snapshot.measurements.length + snapshot.steps.length + snapshot.checkins.length + snapshot.diets.length}<small> 条记录</small></div><p class="muted">${escapeHtml(readerMode ? '数据可能晚于本人最新记录，请以发布时间为准。' : copy.storageFoot)}</p></article></section></main><footer class="footer">轻盈计划 · ${escapeHtml(copy.footerTitle)} <span>${escapeHtml(readerMode ? '只读发布 · 不是实时同步' : copy.footerNote)}</span></footer>${authOpen ? renderAuthModal(formState.error) : ''}</div>`;
 }
 
 function renderBodyStatus(snapshot: HealthSnapshot, whr: number | null, progress: number, todayDiet: DietRecord[]): string {
@@ -482,14 +641,16 @@ function renderBodyStatus(snapshot: HealthSnapshot, whr: number | null, progress
   return `<div class="body-status-details"><article class="card goal-card"><div class="card-heading"><div><p class="eyebrow">PROGRESS · 目标进度与代谢</p><h3>目标进度与代谢</h3></div><span class="goal-number">${Math.round(progress)}%</span></div><div class="progress-track"><span style="width:${Math.min(100, Math.max(0, progress))}%"></span></div><div class="goal-row"><span>当前 / 目标 <b>${formatNumber(weight)} / ${formatNumber(settings.targetWeightKg)} kg</b></span><span>还差 <b>${formatNumber(Math.max(0, weight - settings.targetWeightKg))} kg</b></span></div><div class="detail-list"><div><span>基础代谢 BMR</span><b>${formatInteger(bmr)} kcal</b></div><div><span>日常消耗 TDEE</span><b>${formatInteger(tdee)} kcal</b></div><div><span>腰臀比 WHR</span><b>${whr ? formatNumber(whr, 2) : '--'}</b></div></div></article><article class="card metabolism-card"><div class="card-heading"><div><p class="eyebrow">METABOLISM · 代谢与饮食目标</p><h3>代谢与饮食目标</h3></div><span class="chart-meta">今日 ${formatNumber(calories, 0)} / ${formatInteger(settings.calorieTarget)} kcal</span></div><div class="diet-macro-grid"><div><span>热量</span><b>${formatNumber(calories, 0)} / ${formatInteger(settings.calorieTarget)} kcal</b></div><div><span>蛋白质</span><b>${formatNumber(protein, 0)} / ${formatInteger(settings.proteinTarget)} g</b></div><div><span>脂肪</span><b>${formatNumber(fat, 0)} / ${formatInteger(settings.fatTarget)} g</b></div><div><span>碳水</span><b>${formatNumber(carb, 0)} / ${formatInteger(settings.carbTarget)} g</b></div><div><span>钠上限</span><b>&lt; ${formatInteger(settings.sodiumTarget)} mg</b></div></div></article></div>`;
 }
 
-function renderSettingsCard(snapshot: HealthSnapshot, editing: boolean): string {
+function renderSettingsCard(snapshot: HealthSnapshot, view: ViewContext): string {
+  const { editing, canUnlock } = view;
   const s = snapshot.settings;
-  if (!editing) return `<article class="card"><div class="card-heading"><div><p class="eyebrow">PROFILE · 设置</p><h2>当前计划</h2></div></div><div class="profile-grid"><div><span>身高</span><b>${formatNumber(s.heightCm)} cm</b></div><div><span>年龄</span><b>${s.age} 岁</b></div><div><span>热量目标</span><b>${formatInteger(s.calorieTarget)} kcal</b></div><div><span>蛋白质目标</span><b>${formatInteger(s.proteinTarget)} g</b></div></div><p class="muted">进入本人编辑模式后可以维护个人基础数据和每日目标。</p></article>`;
+  if (!editing) return `<article class="card"><div class="card-heading"><div><p class="eyebrow">PROFILE · 设置</p><h2>当前计划</h2></div></div><div class="profile-grid"><div><span>身高</span><b>${formatNumber(s.heightCm)} cm</b></div><div><span>年龄</span><b>${s.age} 岁</b></div><div><span>热量目标</span><b>${formatInteger(s.calorieTarget)} kcal</b></div><div><span>蛋白质目标</span><b>${formatInteger(s.proteinTarget)} g</b></div></div><p class="muted">${lockedHint('进入本人编辑模式后可以维护个人基础数据和每日目标。', canUnlock)}</p></article>`;
   return `<article class="card settings-card"><div class="card-heading"><div><p class="eyebrow">PROFILE · 个人基础数据</p><h2>设置</h2></div></div><p class="muted settings-linked-note">保存后会同步更新 BMI、目标进度、BMR/TDEE 和饮食目标进度。</p><form id="settingsForm" class="settings-form"><label>昵称<input name="name" value="${escapeHtml(s.name)}"></label><label>性别<select name="gender"><option value="male">男</option><option value="female" ${s.gender === 'female' ? 'selected' : ''}>女</option><option value="other" ${s.gender === 'other' ? 'selected' : ''}>其他</option></select></label><label>年龄<input name="age" type="number" value="${s.age}"></label><label>身高（cm）<input name="heightCm" type="number" value="${s.heightCm}"></label><label>起始体重（kg）<input name="startWeightKg" type="number" step="0.1" value="${s.startWeightKg}"></label><label>目标体重（kg）<input name="targetWeightKg" type="number" step="0.1" value="${s.targetWeightKg}"></label><label>活动水平<select name="activityFactor"><option value="1.2">久坐</option><option value="1.375" ${s.activityFactor === 1.375 ? 'selected' : ''}>轻度</option><option value="1.55" ${s.activityFactor === 1.55 ? 'selected' : ''}>中度</option><option value="1.725">高活动</option></select></label><label>每日摄入（kcal）<input name="calorieTarget" type="number" value="${s.calorieTarget}"></label><label>蛋白质（g）<input name="proteinTarget" type="number" value="${s.proteinTarget}"></label><label>脂肪（g）<input name="fatTarget" type="number" value="${s.fatTarget}"></label><label>碳水（g）<input name="carbTarget" type="number" value="${s.carbTarget}"></label><label>钠上限（mg/天）<input name="sodiumTarget" type="number" value="${s.sodiumTarget}"></label><button class="primary-button wide-field" type="submit">保存个人设置</button></form></article>`;
 }
 
-function renderEditor(snapshot: HealthSnapshot, editing: boolean, form: BodyFormState, readerMode = false): string {
-  const locked = `<article class="card editor-card locked-editor"><div><p class="eyebrow">RECORD · 记录</p><h2>体重与围度</h2><p class="muted">${readerMode ? '这是只读发布页面，体重、体脂和围度记录不能修改。' : '当前为只读模式。验证本人身份后可以新增、修改和删除体重、体脂、腰围和臀围。'}</p></div>${readerMode ? '' : '<button class="primary-button" data-action="auth-toggle" type="button">进入编辑模式</button>'}</article>`;
+function renderEditor(snapshot: HealthSnapshot, form: BodyFormState, view: ViewContext): string {
+  const { editing, reader: readerMode, canUnlock } = view;
+  const locked = `<article class="card editor-card locked-editor"><div><p class="eyebrow">RECORD · 记录</p><h2>体重与围度</h2><p class="muted">${readerMode ? '这是只读发布页面，体重、体脂和围度记录不能修改。' : lockedHint('验证本人身份后可以新增、修改和删除体重、体脂、腰围和臀围。', canUnlock)}</p></div>${readerMode || !canUnlock ? '' : '<button class="primary-button" data-action="auth-toggle" type="button">进入编辑模式</button>'}</article>`;
   const formTitle = form.target ? '编辑身体记录' : '新增身体记录';
   const weights = [...snapshot.weights].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
   const measurements = [...snapshot.measurements].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
@@ -500,23 +661,25 @@ function renderHistory(weights: WeightRecord[], measurements: HealthSnapshot['me
   return `<article class="card history-card"><div class="history-columns"><div><h3>最近体重</h3>${weights.length ? weights.map((record) => `<div class="history-row"><div><b>${record.date}</b><span>${formatNumber(record.weightKg)} kg${record.bodyfatPercent == null ? '' : ` · 体脂 ${formatNumber(record.bodyfatPercent)}%`}</span></div><div class="row-actions"><button class="text-button" data-action="edit-weight" data-id="${escapeHtml(record.id)}" type="button">编辑</button><button class="text-button danger-text" data-action="delete-weight" data-id="${escapeHtml(record.id)}" type="button">删除</button></div></div>`).join('') : '<p class="muted">还没有体重记录。</p>'}</div><div><h3>最近围度</h3>${measurements.length ? measurements.map((record) => `<div class="history-row"><div><b>${record.date}</b><span>腰 ${formatNumber(record.waistCm)} / 臀 ${formatNumber(record.hipCm)} cm · WHR ${formatNumber(calculateWhr(record.waistCm, record.hipCm) ?? 0, 2)}</span></div><div class="row-actions"><button class="text-button" data-action="edit-measurement" data-id="${escapeHtml(record.id)}" type="button">编辑</button><button class="text-button danger-text" data-action="delete-measurement" data-id="${escapeHtml(record.id)}" type="button">删除</button></div></div>`).join('') : '<p class="muted">还没有围度记录。</p>'}</div></div></article>`;
 }
 
-function renderActivityEditor(snapshot: HealthSnapshot, editing: boolean, form: StepFormState, readerMode = false): string {
+function renderActivityEditor(snapshot: HealthSnapshot, form: StepFormState, view: ViewContext): string {
+  const { editing, reader: readerMode, canUnlock } = view;
   const today = localDate(new Date());
   const dayOfWeek = new Date(`${today}T12:00:00`).getDay();
   const trains = snapshot.settings.trainingPlan[String(dayOfWeek)] ?? [];
   const habits = snapshot.settings.habits;
   const steps = [...snapshot.steps].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
-  if (!editing) return `<section class="editor-section"><div class="section-heading"><div><p class="eyebrow">ACTIVITY · 活动</p><h2>步数与打卡</h2></div></div><article class="card editor-card locked-editor"><div><p class="muted">${readerMode ? '这是只读发布页面，步数和训练习惯打卡不能修改。' : '当前为只读模式。进入本人编辑模式后可以记录步数和训练习惯打卡。'}</p></div>${readerMode ? '' : '<button class="primary-button" data-action="auth-toggle" type="button">进入编辑模式</button>'}</article></section>`;
+  if (!editing) return `<section class="editor-section"><div class="section-heading"><div><p class="eyebrow">ACTIVITY · 活动</p><h2>步数与打卡</h2></div></div><article class="card editor-card locked-editor"><div><p class="muted">${readerMode ? '这是只读发布页面，步数和训练习惯打卡不能修改。' : lockedHint('进入本人编辑模式后可以记录步数和训练习惯打卡。', canUnlock)}</p></div>${readerMode || !canUnlock ? '' : '<button class="primary-button" data-action="auth-toggle" type="button">进入编辑模式</button>'}</article></section>`;
   return `<section class="editor-section"><div class="section-heading"><div><p class="eyebrow">ACTIVITY · 活动</p><h2>步数与打卡</h2></div><span class="saved-note">${form.targetId ? '正在编辑步数' : '今日活动'}</span></div><div class="two-column activity-grid"><article class="card editor-card"><div class="card-heading"><div><p class="eyebrow">${form.targetId ? 'EDIT · 编辑' : 'ADD · 新增'}</p><h2>${form.targetId ? '编辑步数' : '记录步数'}</h2></div>${form.targetId ? '<button class="text-button" data-action="reset-step-form" type="button">取消编辑</button>' : ''}</div><form id="stepForm" class="body-record-form"><label>日期<input name="date" type="date" required value="${escapeHtml(form.date)}"></label><label>步数<input name="steps" type="number" min="0" max="200000" step="1" required placeholder="如 8500" value="${escapeHtml(form.steps)}"></label><label>备注<input name="note" maxlength="80" placeholder="如 公园散步" value="${escapeHtml(form.note)}"></label><div class="form-actions wide-field"><button class="primary-button" type="submit">${form.targetId ? '保存修改' : '保存步数'}</button>${form.error ? `<span class="form-error" role="alert">${escapeHtml(form.error)}</span>` : ''}</div></form><div class="history-list"><h3>最近步数</h3>${steps.length ? steps.map((record) => `<div class="history-row"><div><b>${record.date}</b><span>${formatInteger(record.steps)} 步${record.note ? ` · ${escapeHtml(record.note)}` : ''}</span></div><div class="row-actions"><button class="text-button" data-action="edit-step" data-id="${escapeHtml(record.id)}" type="button">编辑</button><button class="text-button danger-text" data-action="delete-step" data-id="${escapeHtml(record.id)}" type="button">删除</button></div></div>`).join('') : '<p class="muted">还没有步数记录。</p>'}</div></article><article class="card editor-card"><div class="card-heading"><div><p class="eyebrow">CHECK-IN · 打卡</p><h2>今日计划</h2></div></div><div class="checkin-group"><h3>训练</h3>${trains.length ? trains.map((item) => checkinButton(snapshot, today, 'train', item)).join('') : '<p class="muted">今天没有训练计划。</p>'}</div><div class="checkin-group"><h3>习惯</h3>${habits.map((item) => checkinButton(snapshot, today, 'habit', item)).join('')}</div></article></div></section>`;
 }
 
-function renderDietEditor(snapshot: HealthSnapshot, editing: boolean, form: DietFormState, selectedDate: string, readerMode = false): string {
+function renderDietEditor(snapshot: HealthSnapshot, form: DietFormState, selectedDate: string, view: ViewContext): string {
+  const { editing, reader: readerMode, canUnlock } = view;
   const todayDiets = snapshot.diets.filter((record) => record.date === selectedDate);
   const totals = todayDiets.reduce((sum, record) => ({ calorie: sum.calorie + record.calorie, protein: sum.protein + record.protein, fat: sum.fat + record.fat, carb: sum.carb + record.carb, sodium: sum.sodium + record.sodium }), { calorie: 0, protein: 0, fat: 0, carb: 0, sodium: 0 });
   const target = snapshot.settings;
   const mealOptions = ['早餐', '午餐', '晚餐', '加餐'];
   const recent = [...snapshot.diets].sort((a, b) => b.date.localeCompare(a.date) || b.updatedAt.localeCompare(a.updatedAt)).slice(0, 12);
-  if (!editing) return `<section class="editor-section"><div class="section-heading"><div><p class="eyebrow">DIET · 饮食</p><h2>每日饮食记录</h2></div></div><article class="card editor-card locked-editor"><div><p class="muted">${readerMode ? '这是只读发布页面，饮食和营养数据不能修改。' : '当前为只读模式。进入本人编辑模式后可以维护食物和营养数据。'}</p></div>${readerMode ? '' : '<button class="primary-button" data-action="auth-toggle" type="button">进入编辑模式</button>'}</article><article class="card diet-summary-card">${renderDietSummary(totals, target, selectedDate)}</article></section>`;
+  if (!editing) return `<section class="editor-section"><div class="section-heading"><div><p class="eyebrow">DIET · 饮食</p><h2>每日饮食记录</h2></div></div><article class="card editor-card locked-editor"><div><p class="muted">${readerMode ? '这是只读发布页面，饮食和营养数据不能修改。' : lockedHint('进入本人编辑模式后可以维护食物和营养数据。', canUnlock)}</p></div>${readerMode || !canUnlock ? '' : '<button class="primary-button" data-action="auth-toggle" type="button">进入编辑模式</button>'}</article><article class="card diet-summary-card">${renderDietSummary(totals, target, selectedDate)}</article></section>`;
   return `<section class="editor-section"><div class="section-heading"><div><p class="eyebrow">DIET · 饮食</p><h2>每日饮食记录</h2></div><span class="saved-note">${form.targetId ? '正在编辑饮食记录' : `查看 ${selectedDate} 饮食`}</span></div><article class="card editor-card"><div class="card-heading"><div><p class="eyebrow">${form.targetId ? 'EDIT · 编辑' : 'ADD · 添加'}</p><h2>${form.targetId ? '编辑饮食记录' : '添加饮食记录'}</h2></div>${form.targetId ? '<button class="text-button" data-action="reset-diet-form" type="button">取消编辑</button>' : ''}</div><form id="dietForm" class="diet-form"><label>日期<input name="date" type="date" required value="${escapeHtml(form.date)}"></label><label>餐次<select name="meal">${mealOptions.map((meal) => `<option value="${meal}" ${meal === form.meal ? 'selected' : ''}>${meal}</option>`).join('')}</select></label><div class="prompt-actions wide-field"><button class="text-button" data-action="copy-diet-prompt" type="button">复制提示词</button><button class="prompt-help" data-action="show-diet-prompt" type="button" aria-label="查看提示词">!</button><span class="muted">复制后发给 AI，再把 JSON 结果粘贴到下方</span></div><label class="wide-field">粘贴 AI 返回的 JSON<textarea name="aiText" rows="8" placeholder="粘贴 AI 返回的 JSON">${escapeHtml(form.aiText)}</textarea></label><div class="legacy-diet-fields"><input name="food" value="${escapeHtml(form.food)}"><input name="calorie" value="${escapeHtml(form.calorie)}"><input name="protein" value="${escapeHtml(form.protein)}"><input name="fat" value="${escapeHtml(form.fat)}"><input name="carb" value="${escapeHtml(form.carb)}"><input name="sodium" value="${escapeHtml(form.sodium)}"><input name="note" value="${escapeHtml(form.note)}"></div><div class="form-actions wide-field"><button class="primary-button" type="submit">${form.targetId ? '保存修改' : '解析并保存'}</button>${form.error ? `<span class="form-error" role="alert">${escapeHtml(form.error)}</span>` : ''}</div></form></article><article class="card diet-summary-card">${renderDietSummary(totals, target, selectedDate)}</article><article class="card history-card"><div class="card-heading"><div><p class="eyebrow">RECENT · 最近饮食</p><h2>饮食明细</h2></div><span class="chart-meta">${snapshot.diets.length} 条</span></div>${recent.length ? recent.map((record) => `<div class="history-row diet-history-row"><div><b>${record.date} · ${escapeHtml(record.meal)} · ${escapeHtml(record.food)}</b><span>${formatNumber(record.calorie, 0)} kcal · P${formatNumber(record.protein, 0)} F${formatNumber(record.fat, 0)} C${formatNumber(record.carb, 0)} · Na${formatNumber(record.sodium, 0)}mg${record.note ? ` · ${escapeHtml(record.note)}` : ''}</span></div><div class="row-actions"><button class="text-button" data-action="edit-diet" data-id="${escapeHtml(record.id)}" type="button">编辑</button><button class="text-button danger-text" data-action="delete-diet" data-id="${escapeHtml(record.id)}" type="button">删除</button></div></div>`).join('') : '<p class="muted">还没有饮食记录。</p>'}</article></section>`;
 }
 
@@ -630,12 +793,12 @@ function renderCalendarDetail(snapshot: HealthSnapshot, date: string, editing: b
   return `<div class="calendar-detail"><div class="calendar-detail-head"><strong>${safeDate}</strong><span>${weight ? `体重 ${formatNumber(weight.weightKg)} kg` : '未记录体重'} · ${step ? `${formatInteger(step.steps)} 步` : '未记录步数'} · ${dietCount} 条饮食</span></div><div class="calendar-checkins">${checkins.length ? checkins.map(({ type, item }) => { const done = snapshot.checkins.some((record) => record.date === date && record.type === type && record.item === item && record.done); return editing ? `<button class="checkin-button ${done ? 'done' : ''}" data-action="toggle-checkin" data-date="${safeDate}" data-type="${type}" data-item="${escapeHtml(item)}" type="button"><span>${done ? '✓' : '·'}</span>${escapeHtml(item)}</button>` : `<span class="checkin-readonly ${done ? 'done' : ''}">${done ? '✓' : '·'} ${escapeHtml(item)}</span>`; }).join('') : '<span class="muted">当天没有预设训练或习惯。</span>'}</div>${dietItems.length ? `<div class="calendar-diet-list"><strong>饮食明细</strong>${dietItems.map((record) => `<span>${escapeHtml(record.meal)} · ${escapeHtml(record.food)} · ${formatNumber(record.calorie, 0)} kcal</span>`).join('')}</div><div class="calendar-diet-summary">${renderDietSummary(dietTotals, snapshot.settings, date)}</div>` : ''}</div>`;
 }
 
-function renderStorageError(message: string): string {
-  return `<main class="fatal-state"><div class="fatal-icon">!</div><p class="eyebrow">LOCAL STORAGE · 本地存储</p><h1>本地数据暂时不可用</h1><p>${escapeHtml(message)}</p><p class="muted">页面没有把异常状态当成空数据。修复浏览器存储后可以重试。</p><button class="primary-button" data-action="reload">重新读取</button></main>`;
+function renderStorageError(copy: PageCopy, message: string): string {
+  return `<main class="fatal-state"><div class="fatal-icon">!</div><p class="eyebrow">${escapeHtml(copy.errorEyebrow)}</p><h1>${escapeHtml(copy.errorTitle)}</h1><p>${escapeHtml(message)}</p><p class="muted">${escapeHtml(copy.errorHint)}</p><button class="primary-button" data-action="reload">重新读取</button></main>`;
 }
 
-function renderLoading(): string {
-  return '<main class="fatal-state"><div class="loading-mark" aria-hidden="true"></div><p class="eyebrow">LOCAL STORAGE · 本地存储</p><h1>正在打开轻盈计划</h1><p class="muted">正在读取当前浏览器中的健康数据…</p></main>';
+function renderLoading(copy: PageCopy): string {
+  return `<main class="fatal-state"><div class="loading-mark" aria-hidden="true"></div><p class="eyebrow">${escapeHtml(copy.errorEyebrow)}</p><h1>${escapeHtml(copy.loadingTitle)}</h1><p class="muted">${escapeHtml(copy.loadingHint)}</p></main>`;
 }
 
 function bindReload(container: HTMLElement, load: () => Promise<void>): void {

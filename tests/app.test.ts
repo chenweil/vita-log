@@ -1,10 +1,10 @@
 /** @vitest-environment jsdom */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mountApp } from '../src/app';
 import { createEmptySnapshot, type HealthSnapshot } from '../src/domain';
 import type { EditorAuth } from '../src/auth';
-import { StorageError, type HealthDataRepository, type LoadResult } from '../src/storage';
+import { LocalStorageHealthRepository, RECOVERY_KEY, SNAPSHOT_KEY, StorageError, type HealthDataRepository, type LoadResult, type StorageLike } from '../src/storage';
 import { createPublication, PublishedHealthRepository } from '../src/publication';
 import { ReadOnlyEditorAuth } from '../src/auth';
 
@@ -31,6 +31,7 @@ class FakeRepository implements HealthDataRepository {
 
 class FakeAuth implements EditorAuth {
   unlocked = false;
+  canUnlock(): boolean { return true; }
   isUnlocked(): boolean { return this.unlocked; }
   async unlock(): Promise<boolean> { this.unlocked = true; return true; }
   async lock(): Promise<void> { this.unlocked = false; }
@@ -83,10 +84,13 @@ describe('static application boundary', () => {
     const authForm = container.querySelector<HTMLFormElement>('#authForm');
     expect(authForm).not.toBeNull();
     authForm?.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
-    await Promise.resolve();
-    await Promise.resolve();
+    // Unlocking re-reads the snapshot under the new session before the editor
+    // opens, so the form appears only after that read lands. Counting promise
+    // ticks was enough when the editor appeared immediately and is not enough
+    // now that it waits on a repository call.
+    await vi.waitFor(() => { if (!container.querySelector('#bodyRecordForm')) throw new Error('editor not open yet'); });
 
-    const bodyForm = container.querySelector<HTMLFormElement>('#bodyRecordForm');
+    const bodyForm = container.querySelector<HTMLFormElement>('#bodyRecordForm')!;
     expect(bodyForm).not.toBeNull();
     const weight = bodyForm?.querySelector<HTMLInputElement>('input[name="weightKg"]');
     const date = bodyForm?.querySelector<HTMLInputElement>('input[name="date"]');
@@ -237,7 +241,96 @@ describe('static application boundary', () => {
 });
 
 class FakeAuthUnlocked implements EditorAuth {
+  canUnlock(): boolean { return true; }
   isUnlocked(): boolean { return true; }
   async unlock(): Promise<boolean> { return true; }
   async lock(): Promise<void> {}
 }
+
+/**
+ * The pure static build (06.1-04 acceptance 5).
+ *
+ * It mounts with no auth argument, so `mountApp`'s default `ReadOnlyEditorAuth`
+ * is the whole authorization story — there is no server to ask. What it must
+ * still do is read and export, and what it must stop doing is advertise an
+ * unlock route it cannot honour.
+ */
+describe('纯静态模式', () => {
+  const memory = (snapshot: HealthSnapshot): StorageLike => {
+    const values = new Map<string, string>([[SNAPSHOT_KEY, JSON.stringify(snapshot)]]);
+    return {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => { values.set(key, value); },
+      removeItem: (key) => { values.delete(key); },
+    };
+  };
+
+  const fixture = (): HealthSnapshot => {
+    const snapshot = createEmptySnapshot('2026-10-06T07:00:00.000Z');
+    snapshot.settings.name = '轻盈';
+    snapshot.weights = [{ id: 'w1', date: '2026-10-06', weightKg: 76.4, note: '晨起空腹', createdAt: '2026-10-06T07:00:00.000Z', updatedAt: '2026-10-06T07:00:00.000Z' }];
+    return snapshot;
+  };
+
+  const openStatic = async (): Promise<HTMLElement> => {
+    const container = document.createElement('div');
+    document.body.append(container);
+    mountApp(container, new LocalStorageHealthRepository(memory(fixture())));
+    for (let turn = 0; turn < 12 && !container.querySelector('[data-action="export-json"]'); turn += 1) await Promise.resolve();
+    if (!container.querySelector('[data-action="export-json"]')) await new Promise((resolve) => { setTimeout(resolve, 0); });
+    return container;
+  };
+
+  it('可以查看和导出数据', async () => {
+    const container = await openStatic();
+    expect(container.textContent).toContain('轻盈，今天也稳稳向前。');
+    expect(container.textContent).toContain('只读 · 本地');
+    // Where the data lives is part of what this build can honestly claim. The
+    // online build asserts the opposite of this string for the same reason.
+    expect(container.textContent).toContain('数据只保存在当前浏览器');
+    expect(container.querySelector('[data-action="export-json"]')).not.toBeNull();
+    expect(container.querySelectorAll('[data-action="export-csv"]').length).toBeGreaterThan(0);
+  });
+
+  it('没有任何编辑入口，也不谎称有一个', async () => {
+    const container = await openStatic();
+    expect(container.querySelector('[data-action="auth-toggle"]')).toBeNull();
+    // Each locked panel names the situation. Asserting on the data-manager line
+    // alone would pass even if every panel still promised an unlock route,
+    // because that panel carries different text.
+    const lockedPanels = (container.textContent ?? '').match(/当前为纯静态只读页面，没有编辑入口。/g) ?? [];
+    expect(lockedPanels.length, '体重与围度、饮食、步数与设置四处都应说明这是只读页面').toBe(4);
+    expect(container.textContent).toContain('这是纯静态只读页面');
+    expect(container.textContent).not.toContain('进入编辑模式');
+    expect(container.textContent).not.toContain('进入本人编辑模式后可以');
+    expect(container.querySelectorAll('form')).toHaveLength(0);
+    expect(container.querySelector('[data-action="clear-all"]')).toBeNull();
+    expect(container.querySelector('[data-action="commit-transfer"]')).toBeNull();
+  });
+
+  it('页面渲染本身不会写入存储', async () => {
+    // "Read-only" has to mean nothing was sent, not that the page tried and the
+    // write was swallowed somewhere below.
+    const storage = memory(fixture());
+    const repository = new LocalStorageHealthRepository(storage);
+    const container = document.createElement('div');
+    document.body.append(container);
+    mountApp(container, repository);
+    for (let turn = 0; turn < 12 && !container.querySelector('[data-action="export-json"]'); turn += 1) await Promise.resolve();
+
+    expect(storage.getItem(RECOVERY_KEY)).toBeNull();
+    expect((JSON.parse(storage.getItem(SNAPSHOT_KEY)!) as HealthSnapshot).weights[0]?.weightKg).toBe(76.4);
+  });
+
+  it('只读来自页面而不是被阉割的仓库：LocalStorageHealthRepository 本身仍会写入', async () => {
+    // A repository that silently swallowed writes would let this whole file pass
+    // while the control that actually protects the owner's data — never sending
+    // a write at all — went untested.
+    const storage = memory(fixture());
+    const repository = new LocalStorageHealthRepository(storage);
+    const next = fixture();
+    next.weights[0] = { ...next.weights[0]!, weightKg: 70 };
+    await repository.commit(next);
+    expect((JSON.parse(storage.getItem(SNAPSHOT_KEY)!) as HealthSnapshot).weights[0]?.weightKg).toBe(70);
+  });
+});

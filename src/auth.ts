@@ -1,4 +1,17 @@
 export interface EditorAuth {
+  /**
+   * Whether this deployment can ever open an editor, as opposed to being
+   * read-only right now.
+   *
+   * This is deliberately not `isUnlocked()`. The page needs to tell "log in to
+   * edit" apart from "this build has no way to edit at all", and those are
+   * different statements: the pure static build shows a dashboard with no
+   * editor, and promising a verification route there would be a promise the
+   * deployment cannot keep. `isUnlocked()` cannot answer it, because a
+   * read-only deployment is permanently false while a locked owner session is
+   * false for the next half hour.
+   */
+  canUnlock(): boolean;
   isUnlocked(): boolean;
   unlock(username: string, password: string): Promise<boolean>;
   lock(): Promise<void>;
@@ -15,6 +28,7 @@ export interface EditorAuth {
  * to the server, which ServerEditorAuth drives.
  */
 export class ReadOnlyEditorAuth implements EditorAuth {
+  canUnlock(): boolean { return false; }
   isUnlocked(): boolean { return false; }
   async unlock(_username: string, _password: string): Promise<boolean> { return false; }
   async lock(): Promise<void> {}

@@ -2,6 +2,7 @@ import './styles.css';
 import { mountApp } from './app';
 import { ReadOnlyEditorAuth } from './auth';
 import { parsePublication, PublishedHealthRepository } from './publication';
+import { D1HealthRepository } from './d1-storage';
 import { LocalStorageHealthRepository, type StorageLike } from './storage';
 import { SqliteHealthRepository } from './sqlite-storage';
 import { ServerEditorAuth } from './server-auth';
@@ -22,12 +23,19 @@ if (!container) {
 const appContainer = container;
 
 const publicationPath = new URLSearchParams(window.location.search).get('publication');
+const storageMode = document.querySelector('meta[name="vita-log-storage"]')?.getAttribute('content');
 
 if (publicationPath) {
   void loadPublication(publicationPath);
-} else if (document.querySelector('meta[name="vita-log-storage"][content="sqlite"]')) {
-  mountApp(appContainer, new SqliteHealthRepository(), new ServerEditorAuth());
+} else if (storageMode === 'd1') {
+  // Cloudflare：在线事实来源是 D1，访客匿名读取，保存走服务端会话授权。
+  // 故障时报错而不是回退本机存储 —— 见 ADR-0002 的 fail-closed 决定。
+  mountApp(appContainer, new D1HealthRepository(), new ServerEditorAuth(), { source: 'server' });
+} else if (storageMode === 'sqlite') {
+  mountApp(appContainer, new SqliteHealthRepository(), new ServerEditorAuth(), { source: 'server' });
 } else {
+  // 纯静态构建：只读查看与导出。刻意只传两个参数 —— 默认 auth 是
+  // ReadOnlyEditorAuth，所以这一支没有、也不该有编辑入口或认证实现。
   try {
     mountApp(container, new LocalStorageHealthRepository(browserStorage()));
   } catch (error) {
