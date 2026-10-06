@@ -37,3 +37,23 @@ CREATE TABLE IF NOT EXISTS health_state (
   version   INTEGER NOT NULL,
   saved_at  TEXT    NOT NULL
 );
+
+-- 06.1-03: the first import stages its candidate row here, reconciles it, and
+-- only then promotes it into health_state above.
+--
+-- The staging table is what makes "public read stays closed until reconciliation
+-- and backup are done" (ADR-0002) enforceable rather than aspirational. A read
+-- path that confirmed a row which was already being served would be confirming
+-- live data, and a mismatch found afterwards could not be undone without deleting
+-- the owner's only copy of their health data. No route in this deployment ever
+-- SELECTs from this table; it is scratch space for one in-flight import.
+--
+-- Its columns deliberately mirror health_state so the promotion carries the
+-- bytes across unchanged, which is what lets the same byte-for-byte comparison
+-- run against both the staged and the promoted row.
+CREATE TABLE IF NOT EXISTS health_state_import (
+  id        INTEGER PRIMARY KEY CHECK (id = 1),
+  payload   TEXT    NOT NULL,
+  version   INTEGER NOT NULL,
+  saved_at  TEXT    NOT NULL
+);

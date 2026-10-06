@@ -67,13 +67,14 @@ const login = async (db: D1DatabaseLike | undefined): Promise<string> => {
 };
 
 /**
- * Rewrite the stored payload immediately after the migration INSERT lands.
+ * Rewrite the staged payload immediately after the migration stages it.
  *
  * A `prepare` wrapper rather than a change to production code, because the thing
- * under test is the reconciliation that runs *after* the write: corrupting the
- * row inside `commitMigration` would test a code path that does not exist.
+ * under test is the reconciliation that runs over the staged candidate: the
+ * import is refused before anything reaches `health_state`, which is exactly the
+ * property that keeps a failed migration from opening public read.
  */
-const corruptAfterInsert = (db: SqliteD1, replacement: () => string): void => {
+const corruptStaging = (db: SqliteD1, replacement: () => string): void => {
   const realPrepare = db.prepare.bind(db);
   db.prepare = (query: string) => {
     const statement = realPrepare(query);
@@ -84,8 +85,8 @@ const corruptAfterInsert = (db: SqliteD1, replacement: () => string): void => {
           ...bound,
           run: async () => {
             const result = await bound.run();
-            if (/INSERT INTO health_state/.test(query)) {
-              db.db.prepare('UPDATE health_state SET payload = ? WHERE id = 1').run(replacement());
+            if (/INSERT OR REPLACE INTO health_state_import/.test(query)) {
+              db.db.prepare('UPDATE health_state_import SET payload = ? WHERE id = 1').run(replacement());
             }
             return result;
           },
@@ -211,9 +212,17 @@ describe('D1 首次迁移', () => {
     const cookie = await login(db);
     await migrate(db, sampleSnapshot(), cookie);
 
-    const inserts = db.queries.filter((q) => /INSERT INTO health_state/.test(q));
-    expect(inserts).toHaveLength(1);
-    expect(inserts[0]).toMatch(/WHERE NOT EXISTS/i);
+    // Only the promotion is guarded. The staging write is deliberately not: it is
+    // scratch space, and a retry after a failed attempt is supposed to replace it.
+    const promotions = db.queries.filter((q) => /INSERT INTO health_state \(/.test(q));
+    expect(promotions).toHaveLength(1);
+    expect(promotions[0]).toMatch(/WHERE NOT EXISTS/i);
+    expect(db.queries.some((q) => /INSERT OR REPLACE INTO health_state_import/.test(q))).toBe(true);
+    // Nothing is promoted before the staged row has been read back.
+    const stageIndex = db.queries.findIndex((q) => /INSERT OR REPLACE INTO health_state_import/.test(q));
+    const readIndex = db.queries.findIndex((q) => /SELECT payload, version, saved_at FROM health_state_import/.test(q));
+    expect(readIndex, '暂存写入后必须先读回对账').toBeGreaterThan(stageIndex);
+    expect(db.queries.indexOf(promotions[0]!), '对账通过后才允许提升').toBeGreaterThan(readIndex);
     db.close();
   });
 
@@ -468,25 +477,75 @@ describe('确认与原子性', () => {
     db.close();
   });
 
-  it('对账失败发生在写入之后：错误信息不说 D1 未被改动', async () => {
-    // The honesty check. Every pre-INSERT refusal leaves D1 untouched, but a
-    // reconciliation failure happens after the row is stored — saying "未改动"
-    // there would send the owner looking for a database state that does not
-    // exist. What matters instead is that the next attempt refuses to overwrite.
+  it('对账失败时 D1 的当前快照不变，且匿名读取仍然关闭', async () => {
+    // ADR-0002: "完成对账和备份前不开放公网读取". Reconciling a row that was
+    // already the online snapshot would mean confirming data visitors are being
+    // served, and a mismatch found afterwards could not be undone without
+    // deleting the owner's only copy. So the candidate is staged in a table no
+    // read path queries, and only a reconciled row is promoted.
     const db = new SqliteD1();
     const cookie = await login(db);
-    corruptAfterInsert(db, () => JSON.stringify(createEmptySnapshot()));
+    corruptStaging(db, () => JSON.stringify(createEmptySnapshot()));
 
     const response = await migrate(db, sampleSnapshot(), cookie);
     expect(response.status).toBe(503);
     const message = (await response.json() as { message: string }).message;
-    expect(message).not.toContain('未改动');
-    expect(message).not.toContain('未改变');
     expect(message).toContain('对账');
+    // Nothing reached the online snapshot...
+    expect(await isD1Empty(db)).toBe(true);
+    // ...so a visitor is not being shown unconfirmed data.
+    const read = await onSnapshotRequest({
+      request: new Request(`${ORIGIN}/api/snapshot`),
+      env: ownerEnv({ VITA_LOG_DB: db }),
+    });
+    expect(read.status, '对账完成前不得开放公网读取').toBe(503);
+    // And the owner is not locked out: a retry is no longer refused as a
+    // migration conflict. It reaches reconciliation again (and fails there only
+    // because this database is still being corrupted), rather than being told
+    // D1 already has data — which is what the previous design did.
+    const retry = await migrate(db, sampleSnapshot(), cookie);
+    expect(retry.status).not.toBe(409);
+    expect((await retry.json() as { message: string }).message).toContain('对账');
+    db.close();
+  });
 
-    // The row really is there, and the empty-database guard now refuses a retry.
-    expect(db.db.prepare('SELECT COUNT(*) AS count FROM health_state').get()).toEqual({ count: 1 });
-    expect((await migrate(db, sampleSnapshot(), cookie)).status).toBe(409);
+  it('暂存失败可重试：暂存数据不对外提供，重试会覆盖它', async () => {
+    const db = new SqliteD1();
+    const cookie = await login(db);
+    // A first attempt that fails reconciliation leaves its candidate behind.
+    const realPrepare = db.prepare.bind(db);
+    let corrupt = true;
+    db.prepare = (query: string) => {
+      const statement = realPrepare(query);
+      return {
+        bind: (...values: unknown[]) => {
+          const bound = statement.bind(...values);
+          return {
+            ...bound,
+            run: async () => {
+              const result = await bound.run();
+              if (corrupt && /INSERT OR REPLACE INTO health_state_import/.test(query)) {
+                db.db.prepare('UPDATE health_state_import SET payload = ? WHERE id = 1').run(JSON.stringify(createEmptySnapshot()));
+              }
+              return result;
+            },
+          } as never;
+        },
+        first: statement.first,
+        run: statement.run,
+      };
+    };
+
+    expect((await migrate(db, sampleSnapshot(), cookie)).status).toBe(503);
+    expect(db.db.prepare('SELECT COUNT(*) AS count FROM health_state_import').get()).toEqual({ count: 1 });
+    expect(await isD1Empty(db)).toBe(true);
+
+    // The scratch row is disposable: the next attempt replaces rather than
+    // accumulates it, and only a reconciled candidate goes live.
+    corrupt = false;
+    expect((await migrate(db, sampleSnapshot(), cookie)).status).toBe(200);
+    expect(db.db.prepare('SELECT COUNT(*) AS count FROM health_state_import').get()).toEqual({ count: 0 });
+    expect(db.storedVersion()).toBe(1);
     db.close();
   });
 
@@ -536,9 +595,9 @@ describe('确认与原子性', () => {
               ...bound,
               run: async () => {
                 const result = await bound.run();
-                if (/INSERT INTO health_state/.test(query)) {
+                if (/INSERT OR REPLACE INTO health_state_import/.test(query)) {
                   const value = column === 'version' ? 99 : '2001-01-01T00:00:00.000Z';
-                  db.db.prepare(`UPDATE health_state SET ${column} = ? WHERE id = 1`).run(value);
+                  db.db.prepare(`UPDATE health_state_import SET ${column} = ? WHERE id = 1`).run(value);
                 }
                 return result;
               },
@@ -576,22 +635,6 @@ describe('确认与原子性', () => {
     db.close();
   });
 
-  it('对账不通过时迁移不报成功', async () => {
-    // The row lands and is then corrupted before the read-back, which is what a
-    // truncated or rewritten write looks like from here. The import must refuse
-    // rather than hand the owner a success it cannot back up.
-    const db = new SqliteD1();
-    const cookie = await login(db);
-    corruptAfterInsert(db, () => JSON.stringify(createEmptySnapshot()));
-
-    const response = await migrate(db, sampleSnapshot(), cookie);
-    expect(response.status).toBe(503);
-    const body = await response.json() as { code: string; message: string };
-    expect(body.code).toBe('database-unavailable');
-    expect(body.message).toContain('对账');
-    db.close();
-  });
-
   it('记录内容被改但数量不变时，对账仍然拒绝', async () => {
     // The stronger case. Counts, dates, nutrition and settings all still match
     // what the owner approved, so a summary-only reconciliation would report a
@@ -599,15 +642,17 @@ describe('确认与原子性', () => {
     // is what pins the byte-for-byte payload comparison.
     const db = new SqliteD1();
     const cookie = await login(db);
-    corruptAfterInsert(db, () => {
-      const stored = JSON.parse(db.db.prepare('SELECT payload FROM health_state WHERE id=1').get()!.payload as string) as HealthSnapshot;
-      stored.diets[0]!.note = '被改写的备注';
-      return JSON.stringify(stored);
+    corruptStaging(db, () => {
+      const staged = JSON.parse(db.db.prepare('SELECT payload FROM health_state_import WHERE id=1').get()!.payload as string) as HealthSnapshot;
+      staged.diets[0]!.note = '被改写的备注';
+      return JSON.stringify(staged);
     });
 
     const response = await migrate(db, sampleSnapshot(), cookie);
     expect(response.status).toBe(503);
     expect((await response.json() as { message: string }).message).toContain('对账');
+    // An altered note must not reach the online snapshot either.
+    expect(await isD1Empty(db)).toBe(true);
     db.close();
   });
 

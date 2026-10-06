@@ -53,6 +53,24 @@ export const MIGRATION_INSERT = 'INSERT INTO health_state (id, payload, version,
 /** Row count of the whole table, so "empty" means empty and not just "no id=1". */
 export const HEALTH_STATE_COUNT_QUERY = 'SELECT COUNT(*) AS count FROM health_state';
 
+/**
+ * The candidate row, parked in a table no read path queries.
+ *
+ * Staging is what makes reconciliation mean anything. Reconciling a row that is
+ * already the online snapshot would mean confirming data that visitors are being
+ * served in the meantime — ADR-0002 requires that public read stays closed until
+ * reconciliation and backup are done, and the only way to honour that is for the
+ * unconfirmed bytes to live somewhere the public read path cannot reach.
+ *
+ * `INSERT OR REPLACE` rather than a guarded insert: this table is scratch space,
+ * not the source of truth, so a retry after a failed attempt is supposed to
+ * overwrite it. The guard belongs on the promotion, not here.
+ */
+export const MIGRATION_STAGE = 'INSERT OR REPLACE INTO health_state_import (id, payload, version, saved_at) VALUES (1, ?, ?, ?)';
+export const MIGRATION_STAGE_CLEAR = 'DELETE FROM health_state_import WHERE id = 1';
+/** Read the staged bytes back, the same columns the promotion will carry over. */
+export const MIGRATION_STAGE_QUERY = 'SELECT payload, version, saved_at FROM health_state_import WHERE id = ?';
+
 export type MigrationCollectionKey = 'weights' | 'measurements' | 'steps' | 'checkins' | 'diets';
 
 export interface MigrationSummary {
@@ -184,24 +202,23 @@ export async function previewMigration(
  * be confirmed is not an import the owner can rely on, and the public read path
  * is already serving this row by then.
  *
- * What each failure does to D1, stated exactly:
+ * The candidate is staged in `health_state_import`, reconciled there, and only
+ * then promoted into `health_state` in one guarded statement. Staging is what
+ * makes the contract below true rather than aspirational:
  *
- * - Every refusal *before* the INSERT — an invalid snapshot, a non-empty
- *   database, a stale preview, a database that cannot be reached — leaves D1
- *   exactly as it was. The guard is inside the INSERT, so there is no window
- *   where a partial row exists.
- * - A reconciliation failure happens *after* the row is already stored. The
- *   import did land; what failed is the confirmation of it. Nothing here rolls
- *   that row back, because deleting the owner's only copy of their health data
- *   on a failed comparison would be the more destructive outcome.
- *
- *   What the owner can actually do is stated in the error: the data is in D1 and
- *   being served, so the next step is to read it, not to re-import. The
- *   empty-database guard will refuse a retry, which is correct — re-running the
- *   import is precisely the overwrite this ticket exists to prevent. This
- *   ticket does not add a reset route; that belongs with the backup/restore
- *   work (06.1-05), and naming a recovery flow that does not exist would send
- *   the owner looking for a button this deployment does not have.
+ * - Every failure *before* the promotion — an invalid snapshot, a staging write
+ *   that will not go in, a reconciliation mismatch, a stale preview, a database
+ *   that cannot be reached — leaves the online snapshot exactly as it was. Since
+ *   `health_state` is still empty, the public read path keeps answering
+ *   "not imported yet" and a retry works normally. ADR-0002 requires that public
+ *   read stays closed until reconciliation and backup are done, and reconciling
+ *   bytes that were already being served could not satisfy that.
+ * - The only failure that can land after the promotion is the final
+ *   confirmation, whose window is a single read of a row this statement just
+ *   wrote. Nothing rolls that row back: deleting the owner's only copy of their
+ *   health data on a failed comparison would be the more destructive outcome, so
+ *   the error says plainly that the data is live and to be read rather than
+ *   re-imported.
  */
 export async function commitMigration(
   db: D1DatabaseLike | undefined,
@@ -218,6 +235,24 @@ export async function commitMigration(
   // statement runs, so a bad import cannot leave a partial row behind.
   const prepared = prepareVersionedState(snapshot, 0, now);
 
+  // 1. Stage. The candidate goes into a table no read path ever queries, so it
+  //    cannot become publicly visible while it is still unconfirmed. Staging is
+  //    disposable: a retry replaces it, which is why this needs no empty guard.
+  try {
+    await db.prepare(MIGRATION_STAGE).bind(prepared.payload, prepared.version, prepared.savedAt).run();
+  } catch (error) {
+    throw new D1UnavailableError('D1 迁移写入失败', { cause: error });
+  }
+
+  // 2. Reconcile the staged bytes against what was sent. Until this passes, the
+  //    online snapshot is still untouched — which is what keeps a failed import
+  //    from changing the current D1 state and from opening public read on data
+  //    nobody has confirmed.
+  await reconcileMigration(db, prepared, 'staged');
+
+  // 3. Promote. The empty-database guard lives inside this INSERT, so the check
+  //    and the write are one statement and a concurrent first import cannot both
+  //    report success.
   let changes: number | undefined;
   try {
     const result = await db.prepare(MIGRATION_INSERT).bind(prepared.payload, prepared.version, prepared.savedAt).run();
@@ -232,15 +267,29 @@ export async function commitMigration(
   // is online when it may not be.
   if (changes === undefined) throw new D1UnavailableError('D1 未返回迁移结果');
 
-  // The returned summary is recomputed from what D1 actually stored, not from
-  // the caller's snapshot. The owner is shown this number afterwards, so it has
-  // to describe the online database rather than the request that reached it.
-  return { version: prepared.version, savedAt: prepared.savedAt, summary: await reconcileMigration(db, prepared) };
+  // 4. Confirm the promoted row, then clear the staging table. The summary the
+  //    owner is shown is recomputed from D1's own bytes, never from the request.
+  const promoted = await reconcileMigration(db, prepared, 'promoted');
+  await clearStaging(db);
+  return { version: promoted.version, savedAt: promoted.savedAt, summary: promoted.summary };
+}
+
+/** Drop the staged candidate once it has been promoted. */
+async function clearStaging(db: D1DatabaseLike): Promise<void> {
+  try {
+    await db.prepare(MIGRATION_STAGE_CLEAR).run();
+  } catch (error) {
+    throw new D1UnavailableError('D1 迁移完成，但清理暂存数据失败', { cause: error });
+  }
 }
 
 /**
- * Read the imported row back, prove it is what was sent, and report what is
- * actually stored.
+ * Read a row back, prove it is what was sent, and report what is stored.
+ *
+ * Called twice: once against the staged candidate, before anything is promoted,
+ * and once against the promoted row, so the promotion itself is confirmed rather
+ * than assumed. The same comparison serves both because both rows are written
+ * from the same `prepared` bytes.
  *
  * Three things are checked, each answering a different way the import could be
  * wrong while still reporting success:
@@ -254,27 +303,46 @@ export async function commitMigration(
  *   nobody else has touched.
  * - the stored payload still normalizes, so the public read path can serve it.
  *
- * The summary is derived from the stored bytes and returned, so the count the
- * owner sees afterwards describes D1 rather than the request that reached it.
+ * `scope` only changes what the failure says, never what is checked. Before the
+ * promotion the online snapshot is still empty, so the owner can simply retry;
+ * after it, the data is live and must not be deleted on a failed comparison.
  */
 async function reconcileMigration(
   db: D1DatabaseLike,
   prepared: { payload: string; savedAt: string; version: number },
-): Promise<MigrationSummary> {
-  let stored: { payload: string; version: number; savedAt: string };
+  scope: 'staged' | 'promoted' = 'staged',
+): Promise<{ version: number; savedAt: string; summary: MigrationSummary }> {
+  const outcome = scope === 'staged'
+    ? 'D1 尚未导入数据，可直接重试迁移'
+    : '数据已写入 D1 并对外提供，请先查看当前数据再决定下一步';
+  const fail = (detail: string): D1UnavailableError =>
+    new D1UnavailableError(`D1 迁移对账失败：${detail}。${outcome}`);
+
+  let stored: { payload: string; version: number; savedAt: string } | null;
   try {
-    stored = await readStoredHealthState(db);
+    // The staged row is read with its own columns and mapped here, so both
+    // sources hand the checks one shape instead of each comparison having to
+    // know which query produced its row.
+    if (scope === 'staged') {
+      const row = await db.prepare(MIGRATION_STAGE_QUERY).bind(1).first<Record<string, unknown>>();
+      stored = row
+        ? { payload: String(row.payload), version: Number(row.version), savedAt: String(row.saved_at) }
+        : null;
+    } else {
+      stored = await readStoredHealthState(db);
+    }
   } catch (error) {
-    throw new D1UnavailableError('D1 迁移对账失败：无法读回导入结果。数据已写入 D1 并对外提供，请先查看当前数据再决定下一步', { cause: error });
+    throw fail('无法读回导入结果');
   }
+  if (!stored) throw fail('读回结果为空');
 
-  if (stored.payload !== prepared.payload) throw new D1UnavailableError('D1 迁移对账失败：写入内容与提交内容不一致。数据已写入 D1 并对外提供，请先查看当前数据再决定下一步');
-  if (stored.version !== prepared.version) throw new D1UnavailableError('D1 迁移对账失败：版本与导入时不一致。数据已写入 D1 并对外提供，请先查看当前数据再决定下一步');
-  if (stored.savedAt !== prepared.savedAt) throw new D1UnavailableError('D1 迁移对账失败：时间戳与导入时不一致。数据已写入 D1 并对外提供，请先查看当前数据再决定下一步');
+  if (stored.payload !== prepared.payload) throw fail('写入内容与提交内容不一致');
+  if (stored.version !== prepared.version) throw fail('版本与导入时不一致');
+  if (stored.savedAt !== prepared.savedAt) throw fail('时间戳与导入时不一致');
 
   try {
-    return summarizeMigration(normalizeHealthSnapshot(stored.payload));
+    return { version: prepared.version, savedAt: prepared.savedAt, summary: summarizeMigration(normalizeHealthSnapshot(stored.payload)) };
   } catch (error) {
-    throw new D1UnavailableError('D1 迁移对账失败：写入的快照无法识别。数据已写入 D1 并对外提供，请先查看当前数据再决定下一步', { cause: error });
+    throw fail('写入的快照无法识别');
   }
 }
