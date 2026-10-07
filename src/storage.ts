@@ -35,6 +35,8 @@ export interface HealthDataRepository {
   load(): Promise<LoadResult>;
   commit(snapshot: HealthSnapshot): Promise<void>;
   loadRecovery(): Promise<HealthSnapshot>;
+  /** Online backup/export re-authorizes at the server without changing the editor's version. */
+  exportSnapshot?(): Promise<HealthSnapshot>;
   /**
    * Whether `commit` leaves the previous snapshot behind as one `loadRecovery`
    * can return.

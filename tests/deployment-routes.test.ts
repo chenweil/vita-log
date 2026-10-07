@@ -46,7 +46,7 @@ const apiLiterals = (source: string): string[] => [...new Set(
 
 describe('部署路由与浏览器适配器一致', () => {
   it('Pages Functions 暴露的 API 路由就是文件列表', () => {
-    expect([...deployedRoutes()].sort()).toEqual(['/api/login', '/api/logout', '/api/migrate', '/api/migration-preview', '/api/owner-snapshot', '/api/session', '/api/snapshot']);
+    expect([...deployedRoutes()].sort()).toEqual(['/api/audit', '/api/backup', '/api/login', '/api/logout', '/api/migrate', '/api/migration-preview', '/api/owner-snapshot', '/api/restore', '/api/session', '/api/snapshot']);
   });
 
   it('D1 适配器请求的每个 URL 都真实存在', () => {
@@ -82,16 +82,15 @@ describe('部署路由与浏览器适配器一致', () => {
     expect(apiLiterals(source).sort(), '客户端引用了精确列表之外的 API 路径').toEqual(calls.map((call) => call.url).sort());
   });
 
-  it('functions/schema.sql 真正建出了代码依赖的表', () => {
+  it('基础 schema 和增量迁移真正建出了代码依赖的表', () => {
     // The double executes this DDL, so a drifted copy would let the whole suite
     // run against a schema the deployment never has. Comments are stripped
     // *before* splitting on `;`, because the header prose contains semicolons
     // that would otherwise cut a comment in half and hand the tail to SQLite.
-    // The double already reads this file by default; passing it explicitly
-    // here just makes the test's dependency on it visible.
+    // The double applies the base schema and the shipped audit migration.
     const fresh = new SqliteD1();
     const tables = (fresh.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name).sort();
-    expect(tables).toEqual(['health_state', 'health_state_import', 'owner_session']);
+    expect(tables).toEqual(['audit_event', 'health_state', 'health_state_import', 'owner_session']);
 
     // The columns the write and session paths bind must exist, or the deployed
     // DDL and the running code disagree about the shape of the row.
@@ -104,6 +103,8 @@ describe('部署路由与浏览器适配器一致', () => {
     // run against both the staged and the promoted row.
     const stagingColumns = (fresh.db.prepare('PRAGMA table_info(health_state_import)').all() as Array<{ name: string }>).map((row) => row.name).sort();
     expect(stagingColumns).toEqual(['id', 'payload', 'saved_at', 'version']);
+    const auditColumns = (fresh.db.prepare('PRAGMA table_info(audit_event)').all() as Array<{ name: string }>).map((row) => row.name).sort();
+    expect(auditColumns).toEqual(['id', 'operation', 'result', 'time', 'version']);
     fresh.close();
   });
 });

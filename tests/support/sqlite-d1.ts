@@ -31,10 +31,10 @@ import type { D1DatabaseLike, D1Statement } from '../../functions/_lib/d1-store'
  * only shows up once something else starts depending on this module from a
  * different environment.
  */
-const DEPLOYED_SCHEMA = readFileSync(
+const DEPLOYED_SCHEMA = (readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), '../../functions/schema.sql'),
   'utf8',
-)
+) + readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../functions/migrations/0001_backup_audit.sql'), 'utf8'))
   // Strip line comments. This has to happen before the caller splits on `;`,
   // and it happens here so no caller has to remember: the header prose contains
   // semicolons that would otherwise cut a comment in half.
@@ -80,6 +80,16 @@ export class SqliteD1 implements D1DatabaseLike {
   }
 
   close(): void { this.db.close(); }
+
+  async batch(statements: D1Statement[]): Promise<Array<{ meta: { changes?: number } }>> {
+    this.db.exec('BEGIN');
+    try {
+      const results = [];
+      for (const statement of statements) results.push(await statement.run());
+      this.db.exec('COMMIT');
+      return results;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
 
   prepare(query: string): D1Statement {
     this.queries.push(query);
@@ -132,4 +142,3 @@ export class SqliteD1 implements D1DatabaseLike {
     return statement(bound);
   }
 }
-

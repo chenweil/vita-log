@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.vita-log.d1-backup</string>
+  <key>WorkingDirectory</key><string>/ABSOLUTE/VITA/REPO</string>
+  <key>ProgramArguments</key><array>
+    <string>/ABSOLUTE/NODE/PATH</string>
+    <string>--import</string><string>tsx</string>
+    <string>server/d1-backup-cli.ts</string><string>backup</string>
+    <string>--origin</string><string>https://vita.example</string>
+    <string>--credentials</string><string>/PRIVATE/DIR/credentials.json</string>
+    <string>--directory</string><string>/PRIVATE/DIR/health</string>
+  </array>
+  <key>StartCalendarInterval</key><dict>
+    <key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key><string>/PRIVATE/DIR/backup.log</string>
+  <key>StandardErrorPath</key><string>/PRIVATE/DIR/backup.log</string>
+</dict></plist>

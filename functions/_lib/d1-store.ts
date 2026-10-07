@@ -1,4 +1,5 @@
 import { normalizeSnapshot, type HealthSnapshot } from '../../src/domain';
+import type { AuditOperation } from './audit';
 
 /**
  * The slice of the D1 API this app uses. Declared structurally so the
@@ -13,6 +14,7 @@ export interface D1Statement {
 
 export interface D1DatabaseLike {
   prepare(query: string): D1Statement;
+  batch?(statements: D1Statement[]): Promise<Array<{ meta: { changes?: number } }>>;
 }
 
 /** D1 is unreachable, unbound, or holds a payload this app cannot read. */
@@ -60,6 +62,14 @@ export const HEALTH_STATE_QUERY_FULL = 'SELECT payload, version, saved_at FROM h
  * disagree.
  */
 export const HEALTH_STATE_WRITE = 'UPDATE health_state SET payload = ?, saved_at = ?, version = ? WHERE id = ? AND version = ?';
+
+/** Admission and the health UPDATE run in one batch transaction. No payload is logged. */
+const AUDIT_WRITE = `INSERT INTO audit_event (time, operation, result, version)
+  SELECT ?, ?, CASE
+    WHEN EXISTS (SELECT 1 FROM health_state WHERE id = 1 AND version = ?) THEN 'success'
+    WHEN EXISTS (SELECT 1 FROM health_state WHERE id = 1) THEN 'version-conflict'
+    ELSE 'database-unavailable' END,
+  CASE WHEN EXISTS (SELECT 1 FROM health_state WHERE id = 1 AND version = ?) THEN ? ELSE ? END`;
 
 /**
  * Read the versioned snapshot D1 holds as the online source of truth.
@@ -208,13 +218,18 @@ export async function commitHealthState(
   snapshot: HealthSnapshot,
   expectedVersion: number,
   now: number,
+  operation: AuditOperation = 'save',
 ): Promise<CommittedHealthState> {
   if (!db) throw new D1UnavailableError('D1 数据库绑定缺失');
   const { payload, savedAt, version: nextVersion } = prepareVersionedState(snapshot, expectedVersion, now);
 
   let changes: number | undefined;
   try {
-    const result = await db.prepare(HEALTH_STATE_WRITE).bind(payload, savedAt, nextVersion, 1, expectedVersion).run();
+    if (!db.batch) throw new Error('D1 transaction support missing');
+    const [, result] = await db.batch([
+      db.prepare(AUDIT_WRITE).bind(savedAt, operation, expectedVersion, expectedVersion, nextVersion, expectedVersion),
+      db.prepare(HEALTH_STATE_WRITE).bind(payload, savedAt, nextVersion, 1, expectedVersion),
+    ]);
     changes = result?.meta?.changes;
   } catch (error) {
     throw new D1UnavailableError('D1 健康数据保存失败', { cause: error });

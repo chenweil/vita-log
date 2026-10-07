@@ -5,6 +5,9 @@ import * as logoutRoute from '../../functions/api/logout';
 import * as snapshotRoute from '../../functions/api/snapshot';
 import * as migrateRoute from '../../functions/api/migrate';
 import * as migrationPreviewRoute from '../../functions/api/migration-preview';
+import * as backupRoute from '../../functions/api/backup';
+import * as auditRoute from '../../functions/api/audit';
+import * as restoreRoute from '../../functions/api/restore';
 import type { FunctionContext } from '../../functions/_lib/api';
 import type { D1DatabaseLike } from '../../functions/_lib/d1-store';
 import { clearRateLimits } from '../../functions/_lib/rate-limit';
@@ -94,6 +97,9 @@ export class CloudflareRuntime {
       '/api/snapshot': snapshotRoute as RouteModule,
       '/api/migrate': migrateRoute as RouteModule,
       '/api/migration-preview': migrationPreviewRoute as RouteModule,
+      '/api/backup': backupRoute as RouteModule,
+      '/api/audit': auditRoute as RouteModule,
+      '/api/restore': restoreRoute as RouteModule,
     };
   }
 

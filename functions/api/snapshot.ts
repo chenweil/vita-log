@@ -5,6 +5,7 @@ import {
 import { ApiError, guardApiErrors, noStore, readJsonBody, requireSameOrigin, unauthorized, versionConflict, type FunctionContext } from '../_lib/api';
 import { addressKey, clientIp, consume, sessionKey, WRITE_ATTEMPTS } from '../_lib/rate-limit';
 import { readSessionToken, resolveSession } from '../_lib/session';
+import type { AuditOperation } from '../_lib/audit';
 
 /** The subset of the Pages Functions context this route reads. */
 export type SnapshotContext = FunctionContext;
@@ -42,7 +43,7 @@ export const onRequestGet = (context: SnapshotContext): Promise<Response> => han
  * body is even read. Nothing here trusts what the page believes about its own
  * state, so hiding the controls is not what protects the data.
  */
-export async function handleOwnerSave(context: SnapshotContext): Promise<Response> {
+export async function handleOwnerSave(context: SnapshotContext, operation: Extract<AuditOperation, 'save' | 'restore'> = 'save'): Promise<Response> {
   // Same-origin first: a cross-site write is refused before it can spend a
   // PBKDF2 round or a database write.
   requireSameOrigin(context.request);
@@ -68,7 +69,7 @@ export async function handleOwnerSave(context: SnapshotContext): Promise<Respons
   }
 
   try {
-    const saved = await commitHealthState(db, body.snapshot as never, expectedVersion, now());
+    const saved = await commitHealthState(db, body.snapshot as never, expectedVersion, now(), operation);
     return noStore(saved, 200);
   } catch (error) {
     if (error instanceof HealthStateVersionConflict) throw versionConflict(error.message);
@@ -96,4 +97,3 @@ export const onRequest = (context: SnapshotContext): Promise<Response> => {
   if (method === 'PUT') return guardApiErrors(() => handleOwnerSave(context));
   return Promise.resolve(noStore({ code: 'validation-failed', message: '健康数据接口只接受 GET 和 PUT' }, 405));
 };
-

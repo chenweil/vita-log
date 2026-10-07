@@ -116,6 +116,15 @@ export class D1HealthRepository implements HealthDataRepository {
     return this.version;
   }
 
+  async exportSnapshot(): Promise<HealthSnapshot> {
+    const response = await this.request('/api/backup');
+    if (!response.ok) throw await this.errorFrom(response);
+    try {
+      const data = await response.json() as { snapshot?: unknown };
+      return normalizeSnapshot(data.snapshot);
+    } catch (error) { throw new StorageError('database-unavailable', '完整备份读取失败，请稍后重试', { cause: error }); }
+  }
+
   async loadRecovery(): Promise<HealthSnapshot> {
     throw new StorageError('recovery-unavailable', '公开读取模式没有恢复快照');
   }

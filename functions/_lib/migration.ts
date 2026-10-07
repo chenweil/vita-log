@@ -264,7 +264,11 @@ export async function commitMigration(
   //    concurrent first import cannot both report success.
   let changes: number | undefined;
   try {
-    const result = await db.prepare(MIGRATION_INSERT).bind(prepared.payload, prepared.version, prepared.savedAt).run();
+    if (!db.batch) throw new Error('D1 transaction support missing');
+    const [, result] = await db.batch([
+      db.prepare("INSERT INTO audit_event (time, operation, result, version) SELECT ?, 'migrate', 'success', ? WHERE NOT EXISTS (SELECT 1 FROM health_state)").bind(prepared.savedAt, prepared.version),
+      db.prepare(MIGRATION_INSERT).bind(prepared.payload, prepared.version, prepared.savedAt),
+    ]);
     changes = result?.meta?.changes;
   } catch (error) {
     throw new D1UnavailableError('D1 迁移写入失败', { cause: error });
