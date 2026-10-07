@@ -17,6 +17,8 @@
 export const LOGIN_ATTEMPTS = 10;
 /** Successful writes allowed per session inside the window. */
 export const WRITE_ATTEMPTS = 120;
+/** Backup/export has its own budget so repeated downloads do not consume saves. */
+export const BACKUP_ATTEMPTS = 30;
 export const WINDOW_MS = 60_000;
 
 export interface RateLimitVerdict {

@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createEmptySnapshot } from '../src/domain';
 import { createOwnerCredential } from '../functions/_lib/owner-credentials';
 import { CloudflareRuntime, resetRuntime } from './support/cloudflare-runtime';
 import { SqliteD1 } from './support/sqlite-d1';
 import { onRequestPost as restoreRequest } from '../functions/api/restore';
+import { recordBackup } from '../functions/_lib/audit';
+import type { D1Statement } from '../functions/_lib/d1-store';
 
 const PASSWORD = 'a sufficiently long owner password';
 const credential = await createOwnerCredential(PASSWORD);
@@ -15,7 +17,7 @@ beforeEach(() => {
   snapshot.settings.name = 'backup owner';
   runtime.db.seed(JSON.stringify(snapshot), 4);
 });
-afterEach(() => { runtime.close(); resetRuntime(); });
+afterEach(() => { runtime.close(); resetRuntime(); vi.restoreAllMocks(); });
 
 it('完整备份只向本人提供，访客被拒绝且响应不缓存', async () => {
   const anonymous = await runtime.fetch('/api/backup');
@@ -136,4 +138,113 @@ it('损坏的数据库载荷返回不可用，不提供空备份', async () => {
   const response = await runtime.fetch('/api/backup');
   expect(response.status).toBe(503);
   expect(await response.json()).toMatchObject({ code: 'database-unavailable' });
+});
+
+it('没有确认写入时不留下虚假的 success 审计', async () => {
+  runtime.close();
+  runtime = new CloudflareRuntime({ credential, db: new SqliteD1({ silentWrites: true }) });
+  runtime.db.seed(JSON.stringify(createEmptySnapshot()), 2);
+  await runtime.fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: PASSWORD }) });
+  const response = await runtime.fetch('/api/snapshot', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ snapshot: createEmptySnapshot(), expectedVersion: 2 }) });
+  expect(response.status).toBe(503);
+  expect((await (await runtime.fetch('/api/owner-snapshot')).json()).version).toBe(2);
+  const { events } = await (await runtime.fetch('/api/audit')).json();
+  expect(events).toEqual([{ time: expect.any(String), operation: 'save', result: 'unknown', version: 2 }]);
+});
+
+it('空库的写入审计记录未初始化，不冒充数据库故障', async () => {
+  runtime.db.db.exec('DELETE FROM health_state');
+  await runtime.fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: PASSWORD }) });
+  const response = await runtime.fetch('/api/restore', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ snapshot: createEmptySnapshot(), expectedVersion: 0 }) });
+  expect(response.status).toBe(503);
+  expect((await response.json()).message).toContain('尚未导入');
+  const { events } = await (await runtime.fetch('/api/audit')).json();
+  expect(events).toEqual([{ time: expect.any(String), operation: 'restore', result: 'not-initialized', version: 0 }]);
+});
+
+it('审计按写入和导出分流分页，导出不挤掉写入历史', async () => {
+  await runtime.fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: PASSWORD }) });
+  const insert = runtime.db.db.prepare("INSERT INTO audit_event(time, operation, result, version) VALUES ('2026-10-08T00:00:00Z', ?, 'success', ?)");
+  for (let version = 1; version <= 102; version++) insert.run('save', version);
+  for (let index = 0; index < 105; index++) insert.run('backup', 4);
+  const first = await (await runtime.fetch('/api/audit')).json();
+  expect(first.events).toHaveLength(100);
+  expect(first.events[0]).toMatchObject({ operation: 'save', version: 102 });
+  expect(first.nextCursor).not.toBeNull();
+  const second = await (await runtime.fetch(`/api/audit?before=${first.nextCursor}`)).json();
+  expect(second.events.map((event: { version: number }) => event.version)).toEqual([2, 1]);
+  expect(second.nextCursor).toBeNull();
+  const exports = await (await runtime.fetch('/api/audit?kind=backup')).json();
+  expect(exports.events.every((event: { operation: string }) => event.operation === 'backup')).toBe(true);
+});
+
+it('导出审计和写入审计分别有保留上限，仍能遍历全部保留记录', async () => {
+  await runtime.fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: PASSWORD }) });
+  const insert = runtime.db.db.prepare("INSERT INTO audit_event(time, operation, result, version) VALUES ('2026-10-08T00:00:00Z', ?, 'success', ?)");
+  for (let version = 1; version <= 10001; version++) insert.run('save', version);
+  for (let index = 0; index < 1001; index++) insert.run('backup', 4);
+  await recordBackup(runtime.db, 4, new Date().toISOString());
+  const readAll = async (kind: string) => {
+    const events: Array<{ version: number }> = [];
+    let cursor: string | null = null;
+    do {
+      const page = await (await runtime.fetch(`/api/audit?kind=${kind}${cursor ? `&before=${cursor}` : ''}`)).json();
+      events.push(...page.events);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return events;
+  };
+  const writes = await readAll('write');
+  expect(writes).toHaveLength(10000);
+  expect(writes.at(-1)?.version).toBe(2);
+  expect(await readAll('backup')).toHaveLength(1000);
+});
+
+it('实际写入已落库而元数据缺失时，不把成功审计改为失败', async () => {
+  class UnreportedWrite extends SqliteD1 {
+    override async batch(statements: D1Statement[]) {
+      const results = await super.batch(statements);
+      results[0] = { meta: {} };
+      return results;
+    }
+  }
+  runtime.close();
+  runtime = new CloudflareRuntime({ credential, db: new UnreportedWrite() });
+  runtime.db.seed(JSON.stringify(createEmptySnapshot()), 2);
+  await runtime.fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: PASSWORD }) });
+  const response = await runtime.fetch('/api/snapshot', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ snapshot: createEmptySnapshot(), expectedVersion: 2 }) });
+  expect(response.status).toBe(503);
+  expect((await (await runtime.fetch('/api/owner-snapshot')).json()).version).toBe(3);
+  const { events } = await (await runtime.fetch('/api/audit')).json();
+  expect(events).toEqual([{ time: expect.any(String), operation: 'save', result: 'success', version: 3 }]);
+});
+
+it('导出过于频繁时返回限流，且不影响本人保存预算', async () => {
+  await runtime.fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: PASSWORD }) });
+  for (let index = 0; index < 30; index++) expect((await runtime.fetch('/api/backup')).status).toBe(200);
+  const refused = await runtime.fetch('/api/backup');
+  expect(refused.status).toBe(429);
+  expect(refused.headers.get('retry-after')).not.toBeNull();
+  const { events } = await (await runtime.fetch('/api/audit?kind=backup')).json();
+  expect(events).toHaveLength(30);
+  expect((await runtime.fetch('/api/snapshot', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ snapshot: createEmptySnapshot(), expectedVersion: 4 }) })).status).toBe(200);
+});
+
+it('审计游标与分类只接受明确的合法值', async () => {
+  await runtime.fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: PASSWORD }) });
+  for (const query of ['before=0', 'before=-1', 'before=1.5', 'before=1%20OR%201=1', 'kind=public']) {
+    expect((await runtime.fetch(`/api/audit?${query}`)).status).toBe(400);
+  }
+});
+
+it('新会话不能绕过同一 IP 的导出预算，窗口到期后恢复', async () => {
+  const now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+  const login = () => runtime.fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: PASSWORD }) });
+  await login();
+  for (let index = 0; index < 30; index++) expect((await runtime.fetch('/api/backup')).status).toBe(200);
+  await login();
+  expect((await runtime.fetch('/api/backup')).status).toBe(429);
+  clock.mockReturnValue(now + 60_001);
+  expect((await runtime.fetch('/api/backup')).status).toBe(200);
 });

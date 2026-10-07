@@ -51,9 +51,12 @@ export interface HealthDataRepository {
 export type StorageErrorCode = 'read-failed' | 'malformed' | 'write-failed' | 'recovery-unavailable' | 'database-unavailable' | 'unauthorized' | 'version-conflict' | 'validation-failed' | 'migration-conflict' | 'backup-failed';
 
 export class StorageError extends Error {
-  constructor(public readonly code: StorageErrorCode, message: string, options?: { cause?: unknown }) {
+  /** A server can use unauthorized for both 401 and 429; preserve the distinction. */
+  readonly httpStatus?: number;
+  constructor(public readonly code: StorageErrorCode, message: string, options?: { cause?: unknown; httpStatus?: number }) {
     super(message, options);
     this.name = 'StorageError';
+    this.httpStatus = options?.httpStatus;
   }
 }
 

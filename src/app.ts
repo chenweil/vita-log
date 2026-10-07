@@ -548,7 +548,7 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       const value = repository.exportSnapshot ? await repository.exportSnapshot() : snapshot;
       downloadText(kind ? `vita-log-${kind}.csv` : 'vita-log-backup.json', kind ? exportCsv(value, kind) : exportJson(value), kind ? 'text/csv;charset=utf-8' : 'application/json');
     } catch (error) {
-      if (error instanceof StorageError && error.code === 'unauthorized') sessionRefused = true;
+      if (error instanceof StorageError && error.code === 'unauthorized' && error.httpStatus === 401) sessionRefused = true;
       transferMessage = error instanceof StorageError ? error.message : '导出失败，未提供备份文件';
       render();
     }

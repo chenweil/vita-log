@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
@@ -34,7 +34,9 @@ import type { D1DatabaseLike, D1Statement } from '../../functions/_lib/d1-store'
 const DEPLOYED_SCHEMA = (readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), '../../functions/schema.sql'),
   'utf8',
-) + readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../functions/migrations/0001_backup_audit.sql'), 'utf8'))
+) + readdirSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../functions/migrations'))
+  .filter((name) => name.endsWith('.sql')).sort()
+  .map((name) => readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../functions/migrations', name), 'utf8')).join('\n'))
   // Strip line comments. This has to happen before the caller splits on `;`,
   // and it happens here so no caller has to remember: the header prose contains
   // semicolons that would otherwise cut a comment in half.

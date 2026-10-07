@@ -1,4 +1,5 @@
 import { normalizeSnapshot, type DietRecord, type HealthSnapshot } from '../../src/domain';
+import { auditRetentionStatement } from './audit-policy';
 import {
   D1UnavailableError,
   HealthStateVersionConflict,
@@ -265,9 +266,10 @@ export async function commitMigration(
   let changes: number | undefined;
   try {
     if (!db.batch) throw new Error('D1 transaction support missing');
-    const [, result] = await db.batch([
-      db.prepare("INSERT INTO audit_event (time, operation, result, version) SELECT ?, 'migrate', 'success', ? WHERE NOT EXISTS (SELECT 1 FROM health_state)").bind(prepared.savedAt, prepared.version),
+    const [result] = await db.batch([
       db.prepare(MIGRATION_INSERT).bind(prepared.payload, prepared.version, prepared.savedAt),
+      db.prepare("INSERT INTO audit_event (time, operation, result, version) SELECT ?, 'migrate', 'success', ? WHERE changes() = 1 AND EXISTS (SELECT 1 FROM health_state WHERE id = 1 AND version = ? AND payload = ? AND saved_at = ?)").bind(prepared.savedAt, prepared.version, prepared.version, prepared.payload, prepared.savedAt),
+      auditRetentionStatement(db),
     ]);
     changes = result?.meta?.changes;
   } catch (error) {

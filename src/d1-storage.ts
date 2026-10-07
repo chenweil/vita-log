@@ -149,6 +149,6 @@ export class D1HealthRepository implements HealthDataRepository {
       if (typeof body.message === 'string' && body.message) message = body.message;
       if (typeof body.code === 'string' && SERVER_ERROR_CODES.has(body.code as StorageError['code'])) code = body.code as StorageError['code'];
     } catch { /* keep the stable default message rather than surfacing a parse error */ }
-    return new StorageError(code, message);
+    return new StorageError(code, message, { httpStatus: response.status });
   }
 }

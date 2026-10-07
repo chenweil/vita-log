@@ -1,5 +1,6 @@
 import { normalizeSnapshot, type HealthSnapshot } from '../../src/domain';
 import type { AuditOperation } from './audit';
+import { auditRetentionStatement } from './audit-policy';
 
 /**
  * The slice of the D1 API this app uses. Declared structurally so the
@@ -63,13 +64,14 @@ export const HEALTH_STATE_QUERY_FULL = 'SELECT payload, version, saved_at FROM h
  */
 export const HEALTH_STATE_WRITE = 'UPDATE health_state SET payload = ?, saved_at = ?, version = ? WHERE id = ? AND version = ?';
 
-/** Admission and the health UPDATE run in one batch transaction. No payload is logged. */
-const AUDIT_WRITE = `INSERT INTO audit_event (time, operation, result, version)
-  SELECT ?, ?, CASE
-    WHEN EXISTS (SELECT 1 FROM health_state WHERE id = 1 AND version = ?) THEN 'success'
-    WHEN EXISTS (SELECT 1 FROM health_state WHERE id = 1) THEN 'version-conflict'
-    ELSE 'database-unavailable' END,
-  CASE WHEN EXISTS (SELECT 1 FROM health_state WHERE id = 1 AND version = ?) THEN ? ELSE ? END`;
+/** Runs immediately after UPDATE in the same transaction; records its observed outcome. */
+const AUDIT_WRITE = `WITH outcome AS (SELECT CASE
+    WHEN changes() = 1 AND EXISTS (SELECT 1 FROM health_state WHERE id = 1 AND version = ? AND payload = ? AND saved_at = ?) THEN 'success'
+    WHEN NOT EXISTS (SELECT 1 FROM health_state WHERE id = 1) THEN 'not-initialized'
+    WHEN EXISTS (SELECT 1 FROM health_state WHERE id = 1 AND version = ?) THEN 'unknown'
+    ELSE 'version-conflict' END AS result)
+  INSERT INTO audit_event (time, operation, result, version)
+    SELECT ?, ?, result, CASE WHEN result = 'success' THEN ? ELSE ? END FROM outcome`;
 
 /**
  * Read the versioned snapshot D1 holds as the online source of truth.
@@ -226,9 +228,10 @@ export async function commitHealthState(
   let changes: number | undefined;
   try {
     if (!db.batch) throw new Error('D1 transaction support missing');
-    const [, result] = await db.batch([
-      db.prepare(AUDIT_WRITE).bind(savedAt, operation, expectedVersion, expectedVersion, nextVersion, expectedVersion),
+    const [result] = await db.batch([
       db.prepare(HEALTH_STATE_WRITE).bind(payload, savedAt, nextVersion, 1, expectedVersion),
+      db.prepare(AUDIT_WRITE).bind(nextVersion, payload, savedAt, expectedVersion, savedAt, operation, nextVersion, expectedVersion),
+      auditRetentionStatement(db),
     ]);
     changes = result?.meta?.changes;
   } catch (error) {

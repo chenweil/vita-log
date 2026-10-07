@@ -265,6 +265,20 @@ beforeEach(() => { resetRuntime(); document.body.innerHTML = ''; });
 afterEach(() => { vi.useRealTimers(); resetRuntime(); window.confirm = browserConfirm; });
 
 describe('Cloudflare 模式：访客匿名读取', () => {
+  it('导出限流不会把有效 owner 会话降成只读', async () => {
+    const runtime = deployed();
+    const page = openPage(runtime);
+    await until(() => opened(page), 'the initial read');
+    await openEditor(page);
+    for (let index = 0; index < 30; index++) expect((await runtime.fetch('/api/backup')).status).toBe(200);
+    await click(page, '[data-action="export-json"]');
+    await until(() => {
+      expect(page.container.textContent).toContain('导出过于频繁');
+    }, 'the export rate-limit message');
+    expect(page.container.querySelector('#bodyRecordForm')).not.toBeNull();
+    expect(runtime.db.sessionRows()).toBe(1);
+    runtime.close();
+  });
   it('完整备份与分类导出需要本人登录，访客页面没有导出入口', async () => {
     const runtime = deployed();
     const page = openPage(runtime);
