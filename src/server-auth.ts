@@ -1,4 +1,5 @@
 import type { EditorAuth, UnlockResult } from './auth';
+import { isRecord } from './domain';
 
 interface Fetcher { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> }
 
@@ -61,17 +62,25 @@ export class ServerEditorAuth implements EditorAuth {
       // different statement from "these credentials were refused" — and the
       // login POST below would have failed for the same reason.
       if (!session.ok) return await classify(session);
-      const state = await session.json() as { loggedIn: boolean; until: number };
-      if (state.loggedIn && state.until > this.now()) { this.unlockedUntil = state.until; return { outcome: 'unlocked' }; }
+      const state: unknown = await session.json();
+      // Both backends return a boolean flag and a numeric deadline; a logged-out
+      // session has deadline 0. An invalid probe says nothing about the password.
+      if (!isRecord(state) || typeof state.loggedIn !== 'boolean' || typeof state.until !== 'number' || !Number.isFinite(state.until)) return UNAVAILABLE;
+      if (state.loggedIn) {
+        if (state.until <= this.now()) return UNAVAILABLE;
+        this.unlockedUntil = state.until;
+        return { outcome: 'unlocked' };
+      }
+      if (state.until !== 0) return UNAVAILABLE;
       const response = await this.client.fetch('/api/login', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password }) });
       if (!response.ok) return await classify(response);
-      const result = await response.json() as { until?: unknown };
+      const result: unknown = await response.json();
       // A 200 with a body we cannot read is not an unlocked session. Reporting
       // it as one closes the modal and sends the page off to reload as though it
       // held an owner session, which is the one thing this call must never
       // claim without evidence.
-      if (!Number.isFinite(result.until)) return UNAVAILABLE;
-      this.unlockedUntil = Number(result.until);
+      if (!isRecord(result) || typeof result.until !== 'number' || !Number.isFinite(result.until) || result.until <= this.now()) return UNAVAILABLE;
+      this.unlockedUntil = result.until;
       return { outcome: 'unlocked' };
       // A dropped connection, a timeout and an unreadable body all land here.
       // None of them is evidence about the password, so none of them may be

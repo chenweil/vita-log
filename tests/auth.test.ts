@@ -160,6 +160,47 @@ describe('ServerEditorAuth 结果分类', () => {
     }
   });
 
+  it.each([
+    {}, null, [],
+    { loggedIn: 'false', until: NOW + 60_000 },
+    { loggedIn: true, until: String(NOW + 60_000) },
+    { loggedIn: false },
+    { loggedIn: false, until: -1 },
+    { loggedIn: false, until: NOW + 60_000 },
+    { loggedIn: true, until: NOW },
+    { loggedIn: true, until: NOW - 1 },
+  ])('无法识别或已过期的会话探测不继续登录：%j', async (body) => {
+    let loginPosts = 0;
+    const auth = new ServerEditorAuth(client(
+      () => { loginPosts += 1; return Promise.resolve(errorResponse(401, { message: '账号或密码错误' })); },
+      () => Promise.resolve(Response.json(body)),
+    ), () => NOW);
+
+    const result = await auth.unlock('owner', 'the-right-password');
+
+    expect(result.outcome).toBe('unavailable');
+    expect(failure(result)).not.toContain('账号或密码错误');
+    expect(auth.isUnlocked()).toBe(false);
+    expect(loginPosts).toBe(0);
+  });
+
+  it.each([0, -1, NOW - 1, NOW, String(NOW + 60_000)])('登录期限无效或已过期时不能宣称解锁：%j', async (until) => {
+    const auth = new ServerEditorAuth(client(() => Promise.resolve(Response.json({ until }))), () => NOW);
+
+    const result = await auth.unlock('owner', 'the-right-password');
+
+    expect(result.outcome).toBe('unavailable');
+    expect(failure(result)).not.toContain('账号或密码错误');
+    expect(auth.isUnlocked()).toBe(false);
+  });
+
+  it('有效的未登录探测可以继续登录，并取得未来期限', async () => {
+    const auth = new ServerEditorAuth(client(() => Promise.resolve(Response.json({ loggedIn: true, until: NOW + 60_000 }))), () => NOW);
+
+    expect(await auth.unlock('owner', 'the-right-password')).toEqual({ outcome: 'unlocked' });
+    expect(auth.isUnlocked()).toBe(true);
+  });
+
   it('未锁定的服务端会话直接算解锁成功', async () => {
     const auth = new ServerEditorAuth(client(
       () => Promise.resolve(new Response('never called', { status: 500 })),
