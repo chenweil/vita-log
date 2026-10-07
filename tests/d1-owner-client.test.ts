@@ -130,7 +130,7 @@ describe('Cloudflare 模式的编辑会话客户端', () => {
     client.responses.push(Response.json({ loggedIn: false, until: 0, version: 0 }));
     client.responses.push(Response.json({ loggedIn: true, until: 60_000 }));
     const auth = new ServerEditorAuth(client, () => 1_000);
-    expect(await auth.unlock('owner', 'a long owner password')).toBe(true);
+    expect(await auth.unlock('owner', 'a long owner password')).toEqual({ outcome: 'unlocked' });
     expect(auth.isUnlocked()).toBe(true);
     expect(client.calls.map(call => call.input)).toEqual(['/api/session', '/api/login']);
   });
@@ -172,7 +172,7 @@ describe('Cloudflare 模式的编辑会话客户端', () => {
    */
   const assertStillUnlocked = async (client: FakeClient, breakLock: () => void): Promise<void> => {
     const auth = new ServerEditorAuth(client, () => 1_000);
-    expect(await auth.unlock('owner', 'a long owner password')).toBe(true);
+    expect(await auth.unlock('owner', 'a long owner password')).toEqual({ outcome: 'unlocked' });
     expect(auth.isUnlocked()).toBe(true);
     breakLock();
     // Never rejects, so a caller that fires and forgets cannot produce an
@@ -186,7 +186,7 @@ describe('Cloudflare 模式的编辑会话客户端', () => {
     const client = new FakeClient();
     client.responses.push(Response.json({ loggedIn: true, until: 60_000, version: 4 }));
     const auth = new ServerEditorAuth(client, () => 1_000);
-    expect(await auth.unlock('owner', 'a long owner password')).toBe(true);
+    expect(await auth.unlock('owner', 'a long owner password')).toEqual({ outcome: 'unlocked' });
     expect(client.calls).toHaveLength(1);
   });
 
@@ -195,7 +195,7 @@ describe('Cloudflare 模式的编辑会话客户端', () => {
     client.responses.push(Response.json({ loggedIn: false, until: 0, version: 0 }));
     client.responses.push(failWith('unauthorized', '账号或密码错误', 401));
     const auth = new ServerEditorAuth(client, () => 1_000);
-    expect(await auth.unlock('owner', 'wrong')).toBe(false);
+    expect(await auth.unlock('owner', 'wrong')).toEqual({ outcome: 'rejected', message: '账号或密码错误' });
     expect(auth.isUnlocked()).toBe(false);
   });
 
@@ -207,7 +207,7 @@ describe('Cloudflare 模式的编辑会话客户端', () => {
     client.responses.push(Response.json({ loggedIn: false, until: 0, version: 0 }));
     client.responses.push(Response.json({ loggedIn: true, until: 60_000 }));
     const auth = new ServerEditorAuth(client, () => 1_000);
-    expect(await auth.unlock('owner', 'a long owner password')).toBe(true);
+    expect(await auth.unlock('owner', 'a long owner password')).toEqual({ outcome: 'unlocked' });
     expect(client.calls.map((call) => call.input)).toEqual(['/api/session', '/api/login']);
   });
 });

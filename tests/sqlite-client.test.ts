@@ -25,7 +25,7 @@ describe('SQLite browser adapters', () => {
     client.responses.push(Response.json({ configured: false, loggedIn: false, until: 0 }));
     client.responses.push(Response.json({ until: 60_000 }));
     const auth = new ServerEditorAuth(client, () => 1_000);
-    expect(await auth.unlock('owner', 'long-password')).toBe(true);
+    expect(await auth.unlock('owner', 'long-password')).toEqual({ outcome: 'unlocked' });
     expect(auth.isUnlocked()).toBe(true);
     await auth.lock();
     expect(auth.isUnlocked()).toBe(false);

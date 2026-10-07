@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mountApp } from '../src/app';
 import { createEmptySnapshot, type HealthSnapshot } from '../src/domain';
-import type { EditorAuth } from '../src/auth';
+import type { EditorAuth, UnlockResult } from '../src/auth';
 import { LocalStorageHealthRepository, RECOVERY_KEY, SNAPSHOT_KEY, StorageError, type HealthDataRepository, type LoadResult, type StorageLike } from '../src/storage';
 import { SqliteHealthRepository } from '../src/sqlite-storage';
 import { createPublication, PublishedHealthRepository } from '../src/publication';
@@ -36,7 +36,7 @@ class FakeAuth implements EditorAuth {
   unlocked = false;
   canUnlock(): boolean { return true; }
   isUnlocked(): boolean { return this.unlocked; }
-  async unlock(): Promise<boolean> { this.unlocked = true; return true; }
+  async unlock(): Promise<UnlockResult> { this.unlocked = true; return { outcome: 'unlocked' }; }
   async lock(): Promise<void> { this.unlocked = false; }
 }
 
@@ -395,7 +395,7 @@ describe('static application boundary', () => {
 class FakeAuthUnlocked implements EditorAuth {
   canUnlock(): boolean { return true; }
   isUnlocked(): boolean { return true; }
-  async unlock(): Promise<boolean> { return true; }
+  async unlock(): Promise<UnlockResult> { return { outcome: 'unlocked' }; }
   async lock(): Promise<void> {}
 }
 

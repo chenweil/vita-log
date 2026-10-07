@@ -652,6 +652,88 @@ describe('Cloudflare 模式：恢复点', () => {
   });
 });
 
+/**
+ * What the owner is told when a login fails is not a wording choice: 401 and
+ * 503 call for opposite actions — check your password versus come back later —
+ * and the old boolean contract handed the page the same `false` for both, so an
+ * outage was reported as a typo.
+ */
+describe('Cloudflare 模式：登录失败的四类语义', () => {
+  it('凭据被拒与服务不可用给出的是相反的修复指令', async () => {
+    const wrong = deployed();
+    const owner = openPage(wrong);
+    await until(() => opened(owner), 'the initial read');
+    await openEditor(owner, OWNER, 'not the owner password');
+
+    expect(owner.container.textContent).toContain('账号或密码错误');
+    wrong.close();
+
+    // Reads still work; only opening the session fails. That is the shape of a
+    // database that cannot write, and it must not reach the owner as a
+    // password problem.
+    const db = new SqliteD1({ failOn: /INSERT INTO owner_session/ });
+    db.seed(JSON.stringify(ownerSnapshot()), 4);
+    const broken = new CloudflareRuntime({ db, credential: CREDENTIAL, username: OWNER });
+    const page = openPage(broken);
+    await until(() => opened(page), 'the initial read');
+    // The *correct* password — which is exactly the case the old contract
+    // mislabelled.
+    await openEditor(page);
+
+    expect(page.container.textContent).toContain('服务暂时不可用');
+    expect(page.container.textContent, '服务故障时不得指责密码').not.toContain('账号或密码错误');
+    expect(page.container.querySelector('#bodyRecordForm')).toBeNull();
+    broken.close();
+  });
+
+  it('被限流时提示稍后重试，而不是让本人去改密码', async () => {
+    const runtime = deployed();
+    // Spend the login budget the way a confused owner does: by retrying.
+    //
+    // What this pins is that *this backend* answers a limit the way the client
+    // can tell apart from a refusal, and that the owner is told to come back
+    // rather than to change a password. It does not pin the classification
+    // itself: this backend sends its own message, and the page renders that
+    // message whatever the outcome was called, so a mislabelled outcome would
+    // be invisible here. `tests/auth.test.ts` pins the classification,
+    // including the case where no message comes back and this deployment's
+    // default wording is all the owner gets.
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      await runtime.fetch('/api/login', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: OWNER, password: 'not the owner password' }),
+      });
+    }
+
+    const page = openPage(runtime);
+    await until(() => opened(page), 'the initial read');
+    await openEditor(page);
+
+    expect(page.container.textContent).toContain('请一分钟后重试');
+    expect(page.container.textContent, '限流不是密码问题').not.toContain('账号或密码错误');
+    expect(page.container.querySelector('#bodyRecordForm')).toBeNull();
+    expect(runtime.db.sessionRows(), '被限流的尝试不得留下会话').toBe(0);
+    runtime.close();
+  });
+
+  it('登录请求本身断了时，不把网络故障说成密码错误', async () => {
+    const runtime = deployed();
+    const dropLogin = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (String(input) === '/api/login') throw new Error('connection reset');
+      return runtime.fetch(input, init);
+    };
+
+    const page = openPage(runtime, { fetch: dropLogin });
+    await until(() => opened(page), 'the initial read');
+    await openEditor(page);
+
+    expect(page.container.textContent).not.toContain('账号或密码错误');
+    expect(page.container.textContent).toContain('重试');
+    expect(page.container.querySelector('#bodyRecordForm')).toBeNull();
+    runtime.close();
+  });
+});
+
 describe('Cloudflare 模式：锁定', () => {
   it('锁定等服务端确认撤销后才变只读，撤销确实发生在服务端', async () => {
     const runtime = deployed();

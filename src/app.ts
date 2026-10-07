@@ -648,8 +648,11 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     container.querySelectorAll<HTMLFormElement>('#authForm').forEach((form) => form.addEventListener('submit', async (event) => {
       event.preventDefault();
       const data = new FormData(form);
-      const ok = await auth.unlock(String(data.get('username') ?? ''), String(data.get('password') ?? ''));
-      if (!ok) { formState.error = '账号或密码错误，未进入编辑模式'; render(); return; }
+      const result = await auth.unlock(String(data.get('username') ?? ''), String(data.get('password') ?? ''));
+      // A refused credential, a rate limit and an unreachable service each carry
+      // their own repair. Showing all three as "账号或密码错误" sent the owner to
+      // retype a password that was never the problem.
+      if (result.outcome !== 'unlocked') { formState.error = result.message; render(); return; }
       authOpen = false;
       formState.error = '';
       // A fresh login clears a previous server-side refusal; the reload below is

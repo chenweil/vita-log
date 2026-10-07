@@ -32,6 +32,9 @@ import { SqliteD1 } from './sqlite-d1';
  */
 export const ORIGIN = 'https://vita-log.pages.dev';
 
+/** The one cookie this browser holds, named in a single place. */
+const SESSION_COOKIE = /^vita-log-session=([^;]*)/;
+
 type MethodHandler = (context: FunctionContext) => Promise<Response>;
 type RouteModule = Record<string, unknown>;
 
@@ -130,7 +133,10 @@ export class CloudflareRuntime {
     // double handing out a token.
     const setCookie = response.headers.get('set-cookie');
     if (setCookie) {
-      const value = /vita-log-session=([^;]*)/.exec(setCookie)?.[1] ?? '';
+      const value = SESSION_COOKIE.exec(setCookie)?.[1];
+      // An unread cookie is a loud failure, not an empty jar: the old `?? ''`
+      // logged every later request out and the suite still passed.
+      if (value === undefined) throw new Error(`unrecognised set-cookie: ${setCookie}`);
       this.cookie = value ? `vita-log-session=${value}` : '';
     }
     return response;

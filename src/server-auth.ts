@@ -1,6 +1,37 @@
-import type { EditorAuth } from './auth';
+import type { EditorAuth, UnlockResult } from './auth';
 
 interface Fetcher { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> }
+
+/** What each kind of refusal says when the server did not say it itself. */
+const DEFAULT_MESSAGES = {
+  rejected: '账号或密码错误，未进入编辑模式',
+  limited: '尝试过于频繁，请稍后再试',
+  unavailable: '登录服务暂时不可用，请稍后重试',
+} as const;
+
+const UNAVAILABLE: UnlockResult = { outcome: 'unavailable', message: DEFAULT_MESSAGES.unavailable };
+
+/**
+ * Name what went wrong, from the HTTP status.
+ *
+ * Never from the body's `code`: both backends answer a rate limit with
+ * `code: 'unauthorized'` (`server/api.ts:50`, `functions/api/session.ts:57`) —
+ * the same code a wrong password gets. A body-first classifier would file "you
+ * are being throttled" under "your password is wrong", which is the one repair
+ * that cannot help.
+ *
+ * The server's own wording wins when it sent one: it knows the limit and the
+ * retry window, and paraphrasing them would throw away the only number the
+ * owner can act on.
+ */
+const classify = async (response: Response): Promise<UnlockResult> => {
+  const outcome = response.status === 429 ? 'limited'
+    : response.status === 401 || response.status === 400 ? 'rejected'
+      : 'unavailable';
+  const body = await response.json().catch(() => null) as { message?: unknown } | null;
+  const message = typeof body?.message === 'string' && body.message.trim() ? body.message : DEFAULT_MESSAGES[outcome];
+  return { outcome, message };
+};
 
 /**
  * Drives an owner session against either backend, which expose the same three
@@ -23,17 +54,29 @@ export class ServerEditorAuth implements EditorAuth {
   ) {}
   canUnlock(): boolean { return true; }
   isUnlocked(): boolean { return this.unlockedUntil > this.now(); }
-  async unlock(username: string, password: string): Promise<boolean> {
+  async unlock(username: string, password: string): Promise<UnlockResult> {
     try {
       const session = await this.client.fetch('/api/session', { credentials: 'same-origin', cache: 'no-store' });
+      // A probe that cannot answer means the service is in trouble, which is a
+      // different statement from "these credentials were refused" — and the
+      // login POST below would have failed for the same reason.
+      if (!session.ok) return await classify(session);
       const state = await session.json() as { loggedIn: boolean; until: number };
-      if (state.loggedIn && state.until > this.now()) { this.unlockedUntil = state.until; return true; }
+      if (state.loggedIn && state.until > this.now()) { this.unlockedUntil = state.until; return { outcome: 'unlocked' }; }
       const response = await this.client.fetch('/api/login', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password }) });
-      if (!response.ok) return false;
-      const result = await response.json() as { until: number };
-      this.unlockedUntil = result.until;
-      return true;
-    } catch { return false; }
+      if (!response.ok) return await classify(response);
+      const result = await response.json() as { until?: unknown };
+      // A 200 with a body we cannot read is not an unlocked session. Reporting
+      // it as one closes the modal and sends the page off to reload as though it
+      // held an owner session, which is the one thing this call must never
+      // claim without evidence.
+      if (!Number.isFinite(result.until)) return UNAVAILABLE;
+      this.unlockedUntil = Number(result.until);
+      return { outcome: 'unlocked' };
+      // A dropped connection, a timeout and an unreadable body all land here.
+      // None of them is evidence about the password, so none of them may be
+      // reported as evidence about the password.
+    } catch { return UNAVAILABLE; }
   }
 
   /**
