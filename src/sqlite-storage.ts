@@ -10,13 +10,19 @@ export class SqliteHealthRepository implements HealthDataRepository {
   readonly keepsRecoveryPoint = true;
 
   private version = 0;
+  /** Same rule as the D1 repository: the latest read started owns the version. */
+  private readSequence = 0;
   private loaded = false;
   constructor(private readonly client: Fetcher = window) {}
   async load(): Promise<LoadResult> {
+    const read = ++this.readSequence;
     const response = await this.client.fetch('/api/snapshot', { credentials: 'same-origin' });
     const data = await readJson<SqliteLoadResponse>(response);
-    this.version = data.version;
-    this.loaded = true;
+    // A read the page has moved past still answers with its data, but it does
+    // not get to say what the next save is written against — otherwise the page
+    // keeps an older snapshot while the repository claims a newer version, and
+    // the save overwrites another client's update without any conflict.
+    if (read === this.readSequence) { this.version = data.version; this.loaded = true; }
     return { snapshot: normalizeSnapshot(data.snapshot), status: data.empty ? 'new' : 'loaded', scope: 'owner' };
   }
   async commit(snapshot: HealthSnapshot): Promise<void> {

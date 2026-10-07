@@ -45,4 +45,35 @@ describe('SQLite browser adapters', () => {
     await repository.restore('manual-one.sqlite');
     expect(client.calls.at(-1)?.init?.body).toContain('manual-one.sqlite');
   });
+
+  it('never lets a superseded read move the version the next save is built on', async () => {
+    // Two reads overlap: the first is dispatched earlier but lands later, and
+    // by then the server has moved on. The page keeps the snapshot from the
+    // read it accepted, so if the repository adopted the discarded read's
+    // version instead, the next save would be accepted against a version the
+    // page never saw — writing its older content over another client's update,
+    // with no conflict and no error.
+    let releaseFirst: () => void = () => {};
+    const firstPending = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const bodies: string[] = [];
+    let call = 0;
+    const client = {
+      fetch: async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const index = ++call;
+        if (index === 1) await firstPending;
+        if (typeof init?.body === 'string') bodies.push(init.body);
+        // The late read observes a newer server state than the one before it.
+        return Response.json({ snapshot: createEmptySnapshot(), version: index === 1 ? 7 : 5, empty: false });
+      },
+    };
+
+    const repository = new SqliteHealthRepository(client);
+    const superseded = repository.load();
+    await repository.load();
+    releaseFirst();
+    await superseded;
+
+    await repository.commit(createEmptySnapshot());
+    expect(bodies.at(-1)).toContain('"expectedVersion":5');
+  });
 });

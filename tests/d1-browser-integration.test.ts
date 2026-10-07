@@ -176,6 +176,28 @@ const loginFinished = (page: Page): void => {
   if (container.textContent?.includes(READING)) throw new Error('the owner reload is still in flight');
 };
 
+/**
+ * Make "the page has taken this response in" observable.
+ *
+ * A superseded read changes nothing on screen, so the transport is the only
+ * place left that can say whether the page processed it. `setTimeout` runs
+ * after the page's `await response.json()` continuation, so the flag reads as
+ * "the page is done with this response", not "the server answered". Counting
+ * turns instead would be a guess at how many microtasks the handler took.
+ */
+const observedAfter = (response: Response, property: 'json' | 'text', onConsumed: () => void): Response =>
+  new Proxy(response, {
+    get(target, key, receiver) {
+      if (key === property) return async () => {
+        const value = await (target[property]() as Promise<unknown>);
+        setTimeout(onConsumed, 0);
+        return value;
+      };
+      const value = Reflect.get(target, key, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as Response;
+
 /** Fill and submit the login form without waiting for the round trip. */
 const submitLogin = (page: Page, username = OWNER, password = PASSWORD): void => {
   const form = page.container.querySelector<HTMLFormElement>('#authForm');
@@ -236,8 +258,11 @@ const WRITE_CONTROLS = [
 const renderedWriteControls = (page: Page): string[] =>
   WRITE_CONTROLS.filter((selector) => page.container.querySelector(selector) !== null);
 
+/** Cases below stub the confirmation dialog; give the next one a clean one. */
+const browserConfirm = window.confirm;
+
 beforeEach(() => { resetRuntime(); document.body.innerHTML = ''; });
-afterEach(() => { vi.useRealTimers(); resetRuntime(); });
+afterEach(() => { vi.useRealTimers(); resetRuntime(); window.confirm = browserConfirm; });
 
 describe('Cloudflare 模式：访客匿名读取', () => {
   it('访客不登录即可看到完整看板和最新已保存数据', async () => {
@@ -395,6 +420,62 @@ describe('Cloudflare 模式：编辑能力只来自完整 owner 快照', () => {
     runtime.close();
   });
 
+  it('过期的 owner 读取不得改写仓库版本：下一次保存必须被版本冲突挡住', async () => {
+    const runtime = deployed();
+    let parkNextOwnerRead = false;
+    let parked = false;
+    let lateReadConsumed = false;
+    let releaseRead: () => void = () => {};
+    const readPending = new Promise<void>((resolve) => { releaseRead = resolve; });
+    // Park the read *before* it reaches the server, so it observes whatever D1
+    // holds by the time it finally runs. A request dispatched earlier can
+    // perfectly well observe newer server state than one dispatched after it —
+    // and that is what makes a late owner read dangerous rather than merely
+    // redundant.
+    const parkOwnerRead = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const isOwnerRead = (init?.method ?? 'GET') === 'GET' && String(input) === '/api/owner-snapshot';
+      if (isOwnerRead && parkNextOwnerRead) {
+        parkNextOwnerRead = false;
+        parked = true;
+        await readPending;
+        return observedAfter(await runtime.fetch(input, init), 'json', () => { lateReadConsumed = true; });
+      }
+      return runtime.fetch(input, init);
+    };
+
+    const page = openPage(runtime, { fetch: parkOwnerRead });
+    await until(() => opened(page), 'the initial read');
+    await openEditor(page);
+    expect(runtime.db.storedVersion()).toBe(4);
+
+    parkNextOwnerRead = true;
+    await click(page, '[data-action="reload"]');
+    await until(() => { if (!parked) throw new Error('the first refresh has not parked'); }, 'the first refresh to park');
+    await click(page, '[data-action="reload"]');
+    await until(() => {
+      if (page.container.textContent?.includes(READING)) throw new Error('the second refresh is still in flight');
+    }, 'the second refresh to land');
+
+    // Another tab saves while the parked read is still open.
+    const other = ownerOnlySnapshot();
+    other.weights.push({ id: 'w2', date: '2026-10-08', weightKg: 73.9, note: '另一客户端', createdAt: '2026-10-08T08:00:00.000Z', updatedAt: '2026-10-08T08:00:00.000Z' });
+    runtime.db.seed(JSON.stringify(other), 5);
+
+    releaseRead();
+    await until(() => { if (!lateReadConsumed) throw new Error('the parked read has not been taken in'); }, 'the parked read to land');
+
+    // The page still holds v4. The danger is not the discarded snapshot — it is
+    // the repository quietly adopting that read's v5: the next save would then
+    // be accepted against v5 and write v6 built from v4 content, overwriting
+    // what the other tab just saved, with no conflict and no error.
+    await saveWeight(page, '75.1');
+
+    expect(runtime.db.storedVersion(), '过期读取不得让保存越过版本冲突').toBe(5);
+    expect(stored(runtime).weights.map((record) => record.weightKg)).toEqual([76.4, 73.9]);
+    expect(page.container.textContent).toContain('数据已更新，请重新加载');
+    runtime.close();
+  });
+
   it('旧的公共响应晚到时，不得覆盖已登录的 owner 快照并把它保存回去', async () => {
     const runtime = deployed();
     runtime.db.seed(JSON.stringify(ownerOnlySnapshot()), 4);
@@ -416,17 +497,7 @@ describe('Cloudflare 模式：编辑能力只来自完整 owner 快照', () => {
       // so the flag means "the page has taken this response in", not "the server
       // has answered it". Counting turns instead would be a guess about how many
       // microtasks the handler took.
-      return new Proxy(response, {
-        get(target, property, receiver) {
-          if (property === 'text') return async () => {
-            const value = await target.text();
-            setTimeout(() => { staleReadConsumed = true; }, 0);
-            return value;
-          };
-          const value = Reflect.get(target, property, receiver);
-          return typeof value === 'function' ? value.bind(target) : value;
-        },
-      }) as Response;
+      return observedAfter(response, 'text', () => { staleReadConsumed = true; });
     };
 
     const page = openPage(runtime, { fetch: delayRefresh });
@@ -522,6 +593,61 @@ describe('Cloudflare 模式：恢复点', () => {
     expect(button, '在线模式的恢复按钮仍然渲染，只是保持禁用').not.toBeNull();
     expect(button?.disabled).toBe(true);
     expect(page.container.textContent).toContain('暂无恢复快照');
+    runtime.close();
+  });
+
+  it('D1 清空前后都不承诺恢复点：确认框与结果文案都要按能力说话', async () => {
+    const runtime = deployed();
+    const page = openPage(runtime);
+    await until(() => opened(page), 'the initial read');
+    await openEditor(page);
+
+    const asked: string[] = [];
+    window.confirm = (message?: string) => { asked.push(String(message ?? '')); return true; };
+
+    await click(page, '[data-action="clear-all"]');
+    await until(() => {
+      if (!page.container.querySelector('.form-error[role="alert"]')) throw new Error('the clear has not reported back');
+    }, 'the clear result');
+
+    // "当前数据会先保存到恢复点" and "可从恢复点还原" are both promises about a
+    // capability this deployment does not have. The second one is read moments
+    // after the records are gone, which is exactly when the owner is most
+    // likely to believe it.
+    expect(asked[0], '清空前的确认框不能承诺一个 D1 留不下的恢复点').not.toContain('恢复点');
+    expect(page.container.textContent, '清空后的结果不能承诺可从恢复点还原').not.toContain('恢复点还原');
+    // And the honest alternative has to be there: exporting is the only way back.
+    expect(page.container.textContent).toContain('如需保留请先导出完整 JSON');
+    expect(runtime.db.storedVersion()).toBe(5);
+    expect(stored(runtime).weights).toEqual([]);
+    runtime.close();
+  });
+
+  it('D1 导入确认不承诺恢复点', async () => {
+    const runtime = deployed();
+    const page = openPage(runtime);
+    await until(() => opened(page), 'the initial read');
+    await openEditor(page);
+
+    const asked: string[] = [];
+    window.confirm = (message?: string) => { asked.push(String(message ?? '')); return true; };
+    const input = page.container.querySelector<HTMLInputElement>('#transferFile');
+    if (!input) throw new Error('the import control is missing');
+    const contents = JSON.stringify(ownerOnlySnapshot());
+    const backup = new File([contents], 'backup.json', { type: 'application/json' });
+    // This jsdom ships no `Blob.text()`, which every browser has had for years
+    // and which `previewTransferFile` relies on. Supply that one method so the
+    // page's own import path runs — rather than reworking it for a gap in the
+    // test environment.
+    Object.defineProperty(backup, 'text', { value: async () => contents, configurable: true });
+    Object.defineProperty(input, 'files', { value: [backup], configurable: true });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await until(() => { if (!page.container.querySelector('[data-action="commit-transfer"]')) throw new Error('the import preview is not ready'); }, 'the import preview');
+
+    await click(page, '[data-action="commit-transfer"]');
+
+    expect(asked[0], '导入覆盖了全部记录，确认框不能承诺一个 D1 留不下的恢复点').not.toContain('恢复点');
+    expect(runtime.db.storedVersion()).toBe(5);
     runtime.close();
   });
 });

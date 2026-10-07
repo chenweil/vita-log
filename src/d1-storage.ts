@@ -28,9 +28,21 @@ export class D1HealthRepository implements HealthDataRepository {
   readonly keepsRecoveryPoint = false;
 
   private version: number | null = null;
+  /**
+   * Numbers this repository's own reads, so a superseded one cannot define the
+   * version the next save is built on.
+   *
+   * The page drops superseded reads too, and both sides must apply the same
+   * rule — the latest read *started*, not the latest one to land. Otherwise the
+   * page keeps the snapshot it adopted while the repository adopts the version
+   * of a read the page never took: the save then sails past the conflict check
+   * and overwrites another client's update with older content, in a 200.
+   */
+  private readSequence = 0;
   constructor(private readonly client: Fetcher = window) {}
 
   async load(): Promise<LoadResult> {
+    const read = ++this.readSequence;
     // A failed reload must never leave an earlier editing version usable.
     this.version = null;
     const owner = await this.request('/api/owner-snapshot');
@@ -39,7 +51,9 @@ export class D1HealthRepository implements HealthDataRepository {
         const data = await owner.json() as { snapshot: unknown; version: unknown };
         if (!Number.isSafeInteger(data.version) || Number(data.version) < 0) throw new Error('Invalid version');
         const snapshot = normalizeSnapshot(data.snapshot);
-        this.version = Number(data.version);
+        // A read the page has already moved past still answers with its data,
+        // but it does not get to say what the next save is written against.
+        if (read === this.readSequence) this.version = Number(data.version);
         return { snapshot, status: 'loaded', scope: 'owner' };
       } catch (error) {
         throw new StorageError('database-unavailable', '健康数据服务返回了无法识别的内容，请稍后重试', { cause: error });

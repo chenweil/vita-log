@@ -241,6 +241,21 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
     ? '进入本人编辑模式后可以导入备份、历史 CSV 或生成只读发布快照。'
     : '这是纯静态只读页面：可以查看和导出，但没有任何编辑、导入或清空入口。编辑请前往启用在线服务的部署。';
 
+  /**
+   * 只有仓库知道保存后会不会留下恢复点。
+   *
+   * D1 模式没有部署恢复端点，于是「当前数据会先保存到恢复点」「可从恢复点还原」
+   * 都是兑现不了的承诺——第二句尤其危险，它出现在记录刚被清空之后，而那正是
+   * 本人最容易相信它的时候。禁用按钮只挡住了入口，挡不住这两句话，所以确认
+   * 框与结果文案都要按能力说话。
+   *
+   * 没有恢复点的部署里不说「恢复点」：本人从没被告知存在过这个功能，突然在清空
+   * 对话框里看到这个词只会更困惑。「不留撤销副本，清空后无法找回」说的是同一件
+   * 事，且不需要先理解一个不存在的功能。
+   */
+  const recoveryClause = (withPoint: string, withoutPoint: string): string =>
+    (repository.keepsRecoveryPoint ? withPoint : withoutPoint);
+
   const render = (): void => {
     if (!snapshot) {
       container.innerHTML = storageState === 'saving' ? renderLoading(copy) : renderStorageError(copy, storageMessage);
@@ -310,8 +325,8 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       snapshot = next;
       // Only a repository that keeps the previous snapshot can have just made
       // one. D1 deploys no recovery endpoint, and enabling the restore control
-      // there would offer a way back that fails — right next to "已清空全部
-      // 记录，可从恢复点还原".
+      // there would offer a way back that fails — right next to a "已清空全部
+      // 记录，可从恢复点还原" promise, which `recoveryClause` also keeps out.
       if (repository.keepsRecoveryPoint) recoveryAvailable = recoveryAvailable || persistedSnapshot;
       persistedSnapshot = true;
       storageState = 'saved';
@@ -561,8 +576,16 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
       const backup = Number.isInteger(index) ? backups[index] : undefined;
       if (!backup || !window.confirm(`将先备份当前 SQLite，再恢复 ${backup.name}（${backup.summary.total} 条记录）。继续吗？`)) return;
       await sqlite.restore(backup.name);
-      const loaded = await repository.load();
-      snapshot = loaded.snapshot; snapshotScope = loaded.scope; storageState = 'saved'; storageMessage = '已恢复 SQLite 备份'; transferMessage = `已恢复：${backup.name}`;
+      // The reload goes through the page's single read path so that the page's
+      // and the repository's read ordering advance together. Calling
+      // `repository.load()` here instead would advance only the repository's:
+      // a refresh already in flight would then be adopted by the page while
+      // the repository kept the version from this read, and the next save
+      // would be accepted against that version while carrying the stale
+      // snapshot — a 200 that overwrites the data just restored.
+      await load();
+      if (!snapshot) transferMessage = 'SQLite 备份已恢复，但重新读取失败；请刷新页面查看当前数据';
+      else { storageState = 'saved'; storageMessage = '已恢复 SQLite 备份'; transferMessage = `已恢复：${backup.name}`; }
     } catch (error) { transferMessage = error instanceof StorageError ? error.message : 'SQLite 恢复失败，当前数据未改变'; }
     render();
   };
@@ -579,13 +602,19 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
 
   const commitTransfer = async (): Promise<void> => {
     if (!snapshot || !transferPreview?.snapshot || !transferPreview.valid || !canEdit()) { transferMessage = '请先完成校验并进入编辑模式'; render(); return; }
-    if (!window.confirm('导入确认：当前数据会在恢复点中保留，确认写入导入结果吗？')) return;
+    if (!window.confirm(`导入确认：${recoveryClause('当前数据会在恢复点中保留，', '当前部署不留撤销副本，导入会覆盖现有全部记录，')}确认写入导入结果吗？`)) return;
     if (await saveSnapshot(transferPreview.snapshot, 'transfer')) { transferMessage = `导入完成：${transferPreview.accepted} 条记录`; transferPreview = null; }
     render();
   };
 
   const restoreRecovery = async (): Promise<void> => {
     if (!canEdit()) { editing = false; render(); return; }
+    // Left unconditional on purpose: the restore control only renders when
+    // `recoveryAvailable`, which requires a `loadRecovery` that actually
+    // answered — and a repository that answers it keeps a recovery point. The
+    // no-recovery-point branch of `recoveryClause` is therefore unreachable
+    // here, and a branch no reachable state can take is a promise nobody
+    // checks.
     if (!window.confirm('确定恢复上一次本地快照吗？当前数据会先保存在新的恢复点中。')) return;
     try {
       const recovered = await repository.loadRecovery();
@@ -596,9 +625,9 @@ export function mountApp(container: HTMLElement, repository: HealthDataRepositor
 
   const clearAllRecords = async (): Promise<void> => {
     if (!snapshot || !canEdit()) { editing = false; render(); return; }
-    if (!window.confirm('确定清空全部体重、围度、步数、打卡和饮食记录吗？当前数据会先保存到恢复点。')) return;
+    if (!window.confirm(`确定清空全部体重、围度、步数、打卡和饮食记录吗？${recoveryClause('当前数据会先保存到恢复点。', '当前部署不留撤销副本，清空后无法找回。')}`)) return;
     const next: HealthSnapshot = { ...snapshot, updatedAt: new Date().toISOString(), weights: [], measurements: [], steps: [], checkins: [], diets: [] };
-    if (await saveSnapshot(next, 'transfer')) transferMessage = '已清空全部记录，可从恢复点还原';
+    if (await saveSnapshot(next, 'transfer')) transferMessage = recoveryClause('已清空全部记录，可从恢复点还原', '已清空全部记录；当前部署不留撤销副本，如需保留请先导出完整 JSON');
     render();
   };
 

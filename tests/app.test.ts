@@ -5,6 +5,7 @@ import { mountApp } from '../src/app';
 import { createEmptySnapshot, type HealthSnapshot } from '../src/domain';
 import type { EditorAuth } from '../src/auth';
 import { LocalStorageHealthRepository, RECOVERY_KEY, SNAPSHOT_KEY, StorageError, type HealthDataRepository, type LoadResult, type StorageLike } from '../src/storage';
+import { SqliteHealthRepository } from '../src/sqlite-storage';
 import { createPublication, PublishedHealthRepository } from '../src/publication';
 import { ReadOnlyEditorAuth } from '../src/auth';
 
@@ -39,8 +40,20 @@ class FakeAuth implements EditorAuth {
   async lock(): Promise<void> { this.unlocked = false; }
 }
 
+/** Wait for an observable condition; nothing here may be left to a turn count. */
+const untilRendered = async (ready: () => boolean, what: string): Promise<void> => {
+  for (let turn = 0; turn < 60 && !ready(); turn += 1) await new Promise((resolve) => { setTimeout(resolve, 0); });
+  if (!ready()) throw new Error(`never reached: ${what}`);
+};
+
+/** Cases below stub these dialogs; give the next one a clean pair. */
+const browserConfirm = window.confirm;
+const browserPrompt = window.prompt;
+
 afterEach(() => {
   document.body.innerHTML = '';
+  window.confirm = browserConfirm;
+  window.prompt = browserPrompt;
 });
 
 describe('static application boundary', () => {
@@ -141,7 +154,8 @@ describe('static application boundary', () => {
     };
     const container = document.createElement('div');
     document.body.append(container);
-    window.confirm = () => true;
+    const asked: string[] = [];
+    window.confirm = (message?: string) => { asked.push(String(message ?? '')); return true; };
     mountApp(container, new LocalStorageHealthRepository(storage), new FakeAuthUnlocked());
     const settle = async (): Promise<void> => { for (let turn = 0; turn < 6; turn += 1) await Promise.resolve(); };
     await settle();
@@ -162,6 +176,104 @@ describe('static application boundary', () => {
     await settle();
 
     expect((JSON.parse(storage.getItem(SNAPSHOT_KEY)!) as HealthSnapshot).weights[0]?.weightKg, '恢复后应当回到保存前的快照').toBe(76.4);
+
+    // The browser store really does keep a recovery point, so it really can
+    // promise one — including right before a clear. Fixing the online mode by
+    // making every mode stop promising would pass the D1 assertions while
+    // quietly deleting a capability the local build genuinely has.
+    const clear = container.querySelector<HTMLButtonElement>('[data-action="clear-all"]');
+    if (!clear) throw new Error('the clear control is missing');
+    clear.click();
+    await settle();
+
+    expect(asked.at(-1), '浏览器存储留下恢复点，清空前的确认框就该承诺它').toContain('恢复点');
+    expect(container.textContent).toContain('可从恢复点还原');
+  });
+
+  it('restoring a backup reloads through the one sequenced read path', async () => {
+    // The interleaving a review reproduced. A refresh read is still in flight
+    // when the owner restores a SQLite backup; the restore reads again.
+    //
+    // If that second read bypasses the page's read ordering, the repository
+    // advances its own counter while the page does not — so the parked refresh
+    // lands and is adopted by the page, while the repository still holds the
+    // version from the restore. The next save is then accepted against *that*
+    // version while carrying the stale snapshot: a 200 that overwrites the data
+    // just restored, with no conflict and no error.
+    const snapshotWith = (weightKg: number): HealthSnapshot => {
+      const snapshot = createEmptySnapshot('2026-10-06T07:00:00.000Z');
+      snapshot.weights = [{ id: 'w1', date: '2026-10-06', weightKg, note: '', createdAt: '2026-10-06T07:00:00.000Z', updatedAt: '2026-10-06T07:00:00.000Z' }];
+      return snapshot;
+    };
+    // What the server holds when it receives a request — which is not when the
+    // response arrives. A request dispatched earlier can answer from an older
+    // state, and modelling that is the whole point.
+    let server = { version: 3, weightKg: 76.4 };
+    let parkNextRead = false;
+    let parked = false;
+    let releaseRead: () => void = () => {};
+    const readPending = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const written: string[] = [];
+    const client = {
+      fetch: async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? 'GET';
+        if (path === '/api/backups' && method === 'POST') return Response.json({ name: 'manual.sqlite' });
+        if (path === '/api/backups') return Response.json([{ name: 'manual.sqlite', createdAt: '2026-10-05T08:00:00.000Z', summary: { total: 1, firstDate: '2026-10-06', lastDate: '2026-10-06', settings: { name: '', heightCm: 0, targetWeightKg: 0 } } }]);
+        if (path === '/api/restore') {
+          server = { version: 6, weightKg: 73.9 };
+          return Response.json({ snapshot: snapshotWith(server.weightKg), version: server.version, empty: false });
+        }
+        if (path === '/api/snapshot' && method === 'GET') {
+          const observed = { ...server };
+          if (!parkNextRead) return Response.json({ snapshot: snapshotWith(observed.weightKg), version: observed.version, empty: false });
+          parkNextRead = false;
+          parked = true;
+          await readPending;
+          return Response.json({ snapshot: snapshotWith(observed.weightKg), version: observed.version, empty: false });
+        }
+        if (path === '/api/snapshot') {
+          if (typeof init?.body === 'string') written.push(init.body);
+          server = { ...server, version: server.version + 1 };
+          return Response.json({ snapshot: snapshotWith(server.weightKg), version: server.version, empty: false });
+        }
+        throw new Error(`unexpected request: ${path}`);
+      },
+    };
+
+    const container = document.createElement('div');
+    document.body.append(container);
+    window.prompt = () => '1';
+    window.confirm = () => true;
+    mountApp(container, new SqliteHealthRepository(client), new FakeAuthUnlocked());
+    const settle = async (): Promise<void> => { for (let turn = 0; turn < 8; turn += 1) await new Promise((resolve) => { setTimeout(resolve, 0); }); };
+    await settle();
+    if (!container.querySelector('[data-action="restore-sqlite"]')) throw new Error('the restore control is missing');
+
+    parkNextRead = true;
+    container.querySelector<HTMLButtonElement>('[data-action="reload"]')!.click();
+    await untilRendered(() => parked, 'the refresh to park');
+
+    container.querySelector<HTMLButtonElement>('[data-action="restore-sqlite"]')!.click();
+    await untilRendered(() => server.version === 6, 'the restore to land');
+    releaseRead();
+    await settle();
+
+    // The parked refresh answered from before the restore. It was dispatched
+    // first, so the page must drop it — the restore's own read is the newer one.
+    expect(container.textContent, '过期的刷新读取不得覆盖刚恢复的快照').toContain('73.9');
+    expect(container.textContent).not.toContain('76.4');
+
+    const form = container.querySelector<HTMLFormElement>('#bodyRecordForm');
+    if (!form) throw new Error('body form missing');
+    form.querySelector<HTMLInputElement>('input[name="date"]')!.value = '2026-10-10';
+    form.querySelector<HTMLInputElement>('input[name="weightKg"]')!.value = '72.5';
+    form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+    await settle();
+
+    // The version the save is built on has to be the one the restored snapshot
+    // came from; anything else is a conflict the owner can see and act on.
+    expect(written.at(-1), '保存必须以刚恢复的版本为基准').toContain('"expectedVersion":6');
   });
 
   it('renders a measurement trend when two measurements exist', async () => {
