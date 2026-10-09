@@ -13,6 +13,7 @@
     "sqlite": "tsx server/cli.ts",
     "owner": "tsx server/owner-cli.ts",
     "d1:backup": "node --import tsx server/d1-backup-cli.ts",
+    "d1:cutover": "node --import tsx server/d1-cutover-cli.ts",
     "sqlite:server": "npm run build && tsx server/main.ts",
     "verify:release": "npm run build && node scripts/verify-release.mjs",
     "typecheck": "tsc --noEmit",

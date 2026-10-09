@@ -105,6 +105,8 @@ npm run verify:release
 
 静态页面不再内置编辑凭据；公网编辑必须使用 Cloudflare Pages Functions 的服务端认证与权限。
 
+Cloudflare 首次部署和切换按 [部署验收流程](docs/cloudflare-cutover.md)执行；本人操作向导位于 `.scratch/independent-web-v1/wizards/06.1-06-cloudflare.sh`。本机 SQLite 首次迁入空 D1 使用 `npm run d1:cutover -- --help`，完整备份与恢复见 [D1 备份指南](docs/d1-backup-recovery.md)。这些工具已准备，不代表目标平台验收完成。
+
 ## 路线图
 
 计划与票据在 `.scratch/independent-web-v1/`，架构决定在 `docs/adr/`。
