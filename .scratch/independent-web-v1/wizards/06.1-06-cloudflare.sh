@@ -286,7 +286,9 @@ import { lstatSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, relative, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { readOwnerFile } from './server/d1-owner-file.ts';
+import { describePasswordProblem } from './server/credential-policy.ts';
 import { createOwnerCredential } from './functions/_lib/owner-credentials.ts';
+import { describeCredentialProblem } from './functions/_lib/password.ts';
 const root = realpathSync(process.env.CF_BACKUP_DIRECTORY);
 const info = lstatSync(process.env.CF_BACKUP_DIRECTORY);
 const rel = relative(realpathSync('.'), root);
@@ -296,9 +298,18 @@ for (const kind of ['PREVIEW', 'PRODUCTION']) {
   const credentialRel = relative(realpathSync('.'), realpathSync(file));
   if (!credentialRel.startsWith('../') && !isAbsolute(credentialRel)) throw new Error('凭据必须在仓库之外');
   const credentials = readOwnerFile(file);
-  if (credentials.username !== process.env[`CF_${kind}_USERNAME`] || credentials.password.length < 12) throw new Error('账号不一致或密码不足 12 字符');
+  if (credentials.username !== process.env[`CF_${kind}_USERNAME`]) throw new Error('账号与配置不一致');
+  // Both checks are the same ones the runtime applies, run here so a credential
+  // the deployment cannot use is refused before it ever reaches Cloudflare. The
+  // failure it prevents — deployed and unauthenticatable in the same step, with
+  // a login error that points at the wrong subsystem — is expensive to diagnose.
+  const weak = describePasswordProblem(credentials.password);
+  if (weak) throw new Error(`密码不符合门槛：${weak}`);
+  const credential = await createOwnerCredential(credentials.password);
+  const unusable = describeCredentialProblem(credential);
+  if (unusable) throw new Error(unusable);
   const path = join(root, `${kind.toLowerCase()}-${randomUUID()}.secret.txt`);
-  writeFileSync(path, await createOwnerCredential(credentials.password), { mode: 0o600, flag: 'wx' });
+  writeFileSync(path, credential, { mode: 0o600, flag: 'wx' });
   console.log(`${kind} Secret 受限文件：${path}`);
 }
 JS
@@ -343,11 +354,12 @@ show_cmd npm run d1:cutover -- --origin "$CF_PREVIEW_ORIGIN" --credentials "$CF_
 say '核对预览后，在上条命令追加 --confirm --source-sha256 <刚显示的摘要>；首次迁移后不能重放。'
 open_url 'https://developers.cloudflare.com/pages/functions/metrics/'
 step '真实预览登录必须成功；记录客户端耗时，并在目标平台观测 CPU。墙钟耗时不替代 CPU 额度。'
+step '若登录返回 503 且文案是「本人凭据无法在当前环境校验」，那是 Secret 里的凭据缺陷（迭代数超过平台上限 100000），不是 CPU 余量不足：升级套餐没有用，换用迭代数不超过上限的凭据。'
 record CF_LOGIN_DURATION_MS '成功登录的实测墙钟耗时（毫秒）：' '^[0-9]+([.][0-9]+)?$'
 record CF_LOGIN_CPU_MS '目标平台观测的登录 CPU（毫秒）：' '^[0-9]+([.][0-9]+)?$'
 export CF_LOGIN_CPU_MS CF_CPU_BUDGET_MS
 node --input-type=module -e 'const budget=Number(process.env.CF_CPU_BUDGET_MS), used=Number(process.env.CF_LOGIN_CPU_MS); if(!(budget>0 && used>=0 && used<budget)) throw new Error("CPU 余量不足，停止；升级套餐或变更迭代数须另行记录决定")'
-gate '已确认 210000 次 PBKDF2 在当前套餐成功，CPU 证据是目标平台观测，未静默下调迭代数'
+gate '已确认 100000 次 PBKDF2 在当前套餐成功，CPU 证据是目标平台观测，未静默下调迭代数'
 
 stage '预览安全、审计、平台限流与恢复演练'
 open_url 'https://developers.cloudflare.com/waf/rate-limiting-rules/create-zone-dashboard/'

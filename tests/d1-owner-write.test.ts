@@ -534,20 +534,38 @@ describe('D1 owner 写入授权契约', () => {
     }
   });
 
-  it('缺少部署凭据时登录与写入都 fail-closed', async () => {
+  it('部署凭据缺失或不可用时登录与写入都 fail-closed，且如实报出凭据问题', async () => {
     const db = snapshotRow(createEmptySnapshot(), 1);
+    // Every one of these fails for every input, including the correct password,
+    // so none of them is a rejected credential. They used to answer 401
+    // "账号或密码错误", which sends the owner to change a password that was never
+    // the problem and invites retries that cannot succeed. A probe learns one bit
+    // about the deployment; an owner who cannot log in learns where to look.
     for (const env of [
       { VITA_LOG_OWNER_CREDENTIAL: undefined, VITA_LOG_OWNER_USERNAME: undefined },
       { VITA_LOG_OWNER_CREDENTIAL: undefined },
       { VITA_LOG_OWNER_USERNAME: undefined },
       { VITA_LOG_OWNER_CREDENTIAL: 'not-a-credential' },
       { VITA_LOG_OWNER_CREDENTIAL: 'pbkdf2-sha256$1$00$00' },
+      // The value this project actually shipped: a well-formed credential whose
+      // cost is over the platform ceiling. Only the iteration count is wrong.
+      { VITA_LOG_OWNER_CREDENTIAL: `pbkdf2-sha256$210000$00112233445566778899aabbccddeeff$${'00'.repeat(32)}` },
     ]) {
       const response = await attemptLogin(db, PASSWORD, '203.0.113.30', env);
-      expect(response.status, JSON.stringify(env)).toBe(401);
-      expect(response.headers.get('set-cookie')).toBeNull();
+      const label = JSON.stringify(env);
+      expect(response.status, label).toBe(503);
+      const body = await response.json() as { code: string; message: string };
+      expect(body.code, label).toBe('database-unavailable');
+      expect(body.message, label).toContain('凭据');
+      // "请稍后重试" is the one thing it must not say: retrying cannot fix it.
+      expect(body.message, label).not.toContain('稍后重试');
+      expect(response.headers.get('set-cookie'), label).toBeNull();
     }
     expect(db.sessionRows()).toBe(0);
+
+    // No session was issued, so the write path has nothing to authorize.
+    const noCookie = await callPut(db, { snapshot: createEmptySnapshot(), expectedVersion: 1 });
+    expect(noCookie.status).toBe(401);
   });
 
   it('D1 不可用时 fail-closed，不返回成功', async () => {
@@ -634,6 +652,6 @@ describe('部署凭据来源', () => {
   it('createOwnerCredential 产出可校验的 PBKDF2 凭据', async () => {
     const credential = await createOwnerCredential(PASSWORD);
     expect(credential).not.toContain(PASSWORD);
-    expect(credential.startsWith('pbkdf2-sha256$210000$')).toBe(true);
+    expect(credential.startsWith('pbkdf2-sha256$100000$')).toBe(true);
   });
 });

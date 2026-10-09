@@ -15,7 +15,7 @@ describe('凭据材料扫描器', () => {
       // A placeholder is not a credential: it carries no secret, and flagging
       // one would point the check at files that are already safe.
       [`passwordHash: "REDACTED_RETIRED_CREDENTIAL", salt: "REDACTED_RETIRED_CREDENTIAL"`, null],
-      ['pbkdf2-sha256$210000$0123456789abcdef0123456789abcdef$0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789', '预置的 PBKDF2 凭据'],
+      ['pbkdf2-sha256$100000$0123456789abcdef0123456789abcdef$0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789', '预置的 PBKDF2 凭据'],
       [`const stored = 'scrypt$0123456789abcdef0123456789abcdef';`, '预置的 scrypt 凭据'],
       [`const username = 'chenweil@example.com';`, '真实账号或口令字面量'],
     ] as const;
@@ -34,7 +34,7 @@ describe('凭据材料扫描器', () => {
       `salt: string;`,
       `const saltBytes = 16;`,
       // The legitimate PBKDF2 parameter constant, which mentions the KDF.
-      `export const PBKDF2_ITERATIONS = 210_000;`,
+      `export const PBKDF2_ITERATIONS = 100_000;`,
       // Field names in a projection list and a type, not values.
       `for (const key of PUBLIC_SETTING_KEYS) picked[key]`,
       `// passwordHash: 'REDACTED_RETIRED_CREDENTIAL'`,
@@ -84,7 +84,7 @@ describe('凭据材料扫描器', () => {
   it('每条值形状都有能触发它的样本（模式不会静默失效）', () => {
     const samples = [
       'const e="9f86d081884c7d659a87fc5b8e2b9c3f4d5e6a7b";',
-      `x='pbkdf2-sha256$210000$0123456789abcdef0123456789abcdef$0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'`,
+      `x='pbkdf2-sha256$100000$0123456789abcdef0123456789abcdef$0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'`,
       `x='scrypt$0123456789abcdef0123456789abcdef'`,
     ];
     for (const shape of MINIFIED_CREDENTIAL_SHAPES) {
@@ -95,7 +95,7 @@ describe('凭据材料扫描器', () => {
   it('当前源码与构建脚本不含凭据材料', () => {
     // tests/ is deliberately absent: it carries synthetic KDF fixtures that the
     // value shapes cannot tell from a real salt — `d1-password.test.ts` pins
-    // `00010203…` as the salt of a *non*-210,000-iteration case. A file's own
+    // `00010203…` as the salt of a *non*-100,000-iteration case. A file's own
     // test fixture is not a shipped secret, and the artifact that does ship is
     // covered by verify-release.mjs. Widening this to tests/ would need an
     // allowlist entry, which is a weaker guard than the boundary it buys.
@@ -121,7 +121,7 @@ describe('凭据材料扫描器', () => {
     const samples: Record<string, string> = {
       'passwordHash 字面量': `passwordHash = 'abc'`,
       'salt 字面量': `salt = '0123456789abcdef'`,
-      '预置的 PBKDF2 凭据': `pbkdf2-sha256$210000$0123456789abcdef0123456789abcdef$0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789`,
+      '预置的 PBKDF2 凭据': `pbkdf2-sha256$100000$0123456789abcdef0123456789abcdef$0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789`,
       '预置的 scrypt 凭据': `scrypt$0123456789abcdef0123456789abcdef`,
       '真实账号或口令字面量': `username = 'someone@example.com'`,
     };

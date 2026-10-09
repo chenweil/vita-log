@@ -1,13 +1,16 @@
 import { pbkdf2Sync } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createCredential,
   derivePassword,
+  describeCredentialProblem,
   generateSalt,
+  CredentialUnusableError,
   parseCredential,
   PBKDF2_ITERATIONS,
+  PLATFORM_MAX_PBKDF2_ITERATIONS,
   verifyPassword,
 } from '../functions/_lib/password';
 
@@ -24,8 +27,14 @@ function fixedRandom(fill: number): { getRandomValues<T extends ArrayBufferView>
 }
 
 describe('PBKDF2 密码原语', () => {
-  it('固定使用 Web Crypto PBKDF2-HMAC-SHA-256 和 210,000 次迭代', async () => {
-    expect(PBKDF2_ITERATIONS).toBe(210_000);
+  it('固定使用 Web Crypto PBKDF2-HMAC-SHA-256 和 100,000 次迭代', async () => {
+    expect(PBKDF2_ITERATIONS).toBe(100_000);
+    // The deployment cost must stay at or under the platform ceiling. Raising it
+    // past the ceiling does not make the KDF stronger — it makes every login fail
+    // on Cloudflare with NotSupportedError while this entire file stays green,
+    // because neither Node nor local workerd enforces the cap. This one assertion
+    // is the difference between catching that here and catching it in production.
+    expect(PBKDF2_ITERATIONS).toBeLessThanOrEqual(PLATFORM_MAX_PBKDF2_ITERATIONS);
     // The deployment decision is a specific KDF and cost, not "some slow hash".
     // Re-deriving with the published parameters must reproduce the stored digest,
     // which only holds if the algorithm, hash, salt and iteration count are all
@@ -34,7 +43,7 @@ describe('PBKDF2 密码原语', () => {
     const credential = await createCredential('a long owner password', fixedRandom(0x22));
     const parsed = parseCredential(credential);
     expect(parsed).not.toBeNull();
-    expect(parsed?.iterations).toBe(210_000);
+    expect(parsed?.iterations).toBe(100_000);
     expect(await derivePassword('a long owner password', salt, PBKDF2_ITERATIONS)).not.toBeNull();
     // A different password through the same published parameters gives a
     // different digest: the cost is real, not a no-op wrapper.
@@ -65,7 +74,7 @@ describe('PBKDF2 密码原语', () => {
 
   it('凭据格式可往返，并能从中读回盐、迭代次数和摘要', async () => {
     const raw = await createCredential('round trip password', fixedRandom(0x66));
-    expect(raw.startsWith('pbkdf2-sha256$210000$')).toBe(true);
+    expect(raw.startsWith('pbkdf2-sha256$100000$')).toBe(true);
     const parsed = parseCredential(raw)!;
     // A deployment secret is a copied string, so the encoding has to survive it.
     expect(parsed.salt.length).toBe(16);
@@ -79,26 +88,35 @@ describe('PBKDF2 密码原语', () => {
     const digest = valid.split('$')[3]!;
     const malformed = [
       undefined, null, '', 'not a credential', 'pbkdf2-sha256', 'pbkdf2-sha256$', 'pbkdf2-sha256$$',
-      `pbkdf2-sha256$210000$`, `pbkdf2-sha256$210000$${digest}`,
-      `pbkdf2-sha256$210000$${salt}$`, `pbkdf2-sha256$210000$${salt}`,
+      `pbkdf2-sha256$100000$`, `pbkdf2-sha256$100000$${digest}`,
+      `pbkdf2-sha256$100000$${salt}$`, `pbkdf2-sha256$100000$${salt}`,
       // Weakened cost must be rejected rather than accepted: a misconfigured
       // secret that turns the KDF down to a single round is exactly the
-      // regression the 210,000 figure exists to prevent.
+      // regression the cost floor exists to prevent.
       `pbkdf2-sha256$1$${salt}$${digest}`,
       `pbkdf2-sha256$0$${salt}$${digest}`,
-      `pbkdf2-sha256$-210000$${salt}$${digest}`,
-      `pbkdf2-sha256$210000.5$${salt}$${digest}`,
+      `pbkdf2-sha256$-100000$${salt}$${digest}`,
+      `pbkdf2-sha256$100000.5$${salt}$${digest}`,
       `pbkdf2-sha256$99999999999$${salt}$${digest}`,
+      // Over the platform ceiling. Cloudflare refuses PBKDF2 above 100,000
+      // outright, so these cannot be verified no matter what the caller does
+      // next; the parse is where that has to be caught, deterministically, and
+      // not at request time on the platform. 210,000 is not a hypothetical — it
+      // is the value this project shipped first, and it failed on every real
+      // deployment while the local suite stayed green.
+      `pbkdf2-sha256$100001$${salt}$${digest}`,
+      `pbkdf2-sha256$210000$${salt}$${digest}`,
+      `pbkdf2-sha256$600000$${salt}$${digest}`,
       // Wrong algorithm tag.
-      `scrypt$${210_000}$${salt}$${digest}`,
-      `pbkdf2-sha512$210000$${salt}$${digest}`,
+      `scrypt$${100_000}$${salt}$${digest}`,
+      `pbkdf2-sha512$100000$${salt}$${digest}`,
       // Salt and digest must be exactly the sizes the KDF produces.
-      `pbkdf2-sha256$210000$00$${digest}`,
-      `pbkdf2-sha256$210000$${salt}00$${digest}`,
-      `pbkdf2-sha256$210000$${salt}$${digest}00`,
+      `pbkdf2-sha256$100000$00$${digest}`,
+      `pbkdf2-sha256$100000$${salt}00$${digest}`,
+      `pbkdf2-sha256$100000$${salt}$${digest}00`,
       // Hex only: a credential carrying raw bytes would be ambiguous.
-      `pbkdf2-sha256$210000$zzzz$${digest}`,
-      `pbkdf2-sha256$210000$${salt}$zzzz`,
+      `pbkdf2-sha256$100000$zzzz$${digest}`,
+      `pbkdf2-sha256$100000$${salt}$zzzz`,
       // Trailing fields would be silently ignored if the parse were lenient.
       `${valid}$extra`,
       `${valid}$`,
@@ -119,11 +137,11 @@ describe('PBKDF2 密码原语', () => {
     // or encoding shows up as a byte difference rather than as a silent change
     // of what a stored credential means.
     for (const [password, saltHex, iterations] of [
-      ['a long owner password', '000102030405060708090a0b0c0d0e0f', 210_000],
-      ['a long owner password', '000102030405060708090a0b0c0d0e0f', 210_001],
-      ['short', 'ff', 210_000],
-      ['\u00e4\u00f6\u00fc \u4e2d\u6587 \u5bc6\u7801', 'a0b1c2d3', 210_000],
-      ['', '00', 210_000],
+      ['a long owner password', '000102030405060708090a0b0c0d0e0f', 100_000],
+      ['a long owner password', '000102030405060708090a0b0c0d0e0f', 99_999],
+      ['short', 'ff', 100_000],
+      ['\u00e4\u00f6\u00fc \u4e2d\u6587 \u5bc6\u7801', 'a0b1c2d3', 100_000],
+      ['', '00', 100_000],
     ] as const) {
       const salt = Uint8Array.from(saltHex.match(/../g)!.map((byte) => Number.parseInt(byte, 16)));
       const expected = Buffer.from(pbkdf2Sync(password, salt, iterations, 32, 'sha256')).toString('hex');
@@ -181,5 +199,75 @@ describe('PBKDF2 密码原语', () => {
     expect(source).not.toMatch(/timingSafeEqual\s*\(/);
     // The only crypto surface used is the platform one.
     expect(source).toMatch(/crypto\.subtle/);
+  });
+
+  it('迭代数超过平台上限时在本机就失败，不留给平台在请求时拒绝', async () => {
+    // The regression this pins, stated as a test: the project shipped 210,000,
+    // Cloudflare refused it before deriving anything, and every local test passed
+    // because neither Node nor local workerd enforces the cap. Deriving with the
+    // historical value must now fail locally, so the mistake cannot reach a
+    // deployment again while the suite stays green.
+    const salt = generateSalt(fixedRandom(0xcd));
+    await expect(derivePassword('any password', salt, 210_000)).rejects.toBeInstanceOf(CredentialUnusableError);
+    await expect(derivePassword('any password', salt, 600_000)).rejects.toBeInstanceOf(CredentialUnusableError);
+    await expect(derivePassword('any password', salt, PLATFORM_MAX_PBKDF2_ITERATIONS + 1)).rejects.toBeInstanceOf(CredentialUnusableError);
+    // The ceiling itself still works, so the bound is not simply "reject 100,000".
+    await expect(derivePassword('any password', salt, PLATFORM_MAX_PBKDF2_ITERATIONS)).resolves.toBeInstanceOf(Uint8Array);
+  });
+
+  it('平台拒绝该 KDF 时抛 CredentialUnusableError，而不是伪装成密码错误或暂时故障', async () => {
+    // The exact production shape: the runtime answers with NotSupportedError, the
+    // rejection used to travel as a plain Error, and the login route's catch-all
+    // turned it into "健康数据服务暂时不可用，请稍后重试" — sending the owner to
+    // investigate D1, WAF and Access, and telling them to retry a request that
+    // could never start working.
+    const credential = await createCredential('a valid owner password', fixedRandom(0xbc));
+    const real = globalThis.crypto;
+    vi.stubGlobal('crypto', {
+      getRandomValues: real.getRandomValues.bind(real),
+      subtle: {
+        importKey: () => Promise.reject(new Error('NotSupportedError: Pbkdf2 failed: iteration counts above 100000 are not supported (requested 210000).')),
+        deriveBits: () => Promise.reject(new Error('unreachable')),
+      },
+    });
+    try {
+      // Both the right and the wrong password: the refusal does not depend on
+      // what was submitted, which is why it must not be reported as a rejection.
+      await expect(verifyPassword('a valid owner password', credential)).rejects.toBeInstanceOf(CredentialUnusableError);
+      await expect(verifyPassword('wrong password', credential)).rejects.toBeInstanceOf(CredentialUnusableError);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('非迭代数上限的 Web Crypto 故障保留原异常，不误报为 Secret 缺陷', async () => {
+    const credential = await createCredential('a valid owner password', fixedRandom(0xbd));
+    const real = globalThis.crypto;
+    const failure = new Error('OperationError: temporary crypto backend failure');
+    vi.stubGlobal('crypto', {
+      getRandomValues: real.getRandomValues.bind(real),
+      subtle: {
+        importKey: () => Promise.reject(failure),
+        deriveBits: () => Promise.reject(new Error('unreachable')),
+      },
+    });
+    try {
+      await expect(verifyPassword('a valid owner password', credential)).rejects.toBe(failure);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('describeCredentialProblem 在部署前就指出不可校验的凭据', () => {
+    // The deploy-time half. Each of these is a Secret that would paste into
+    // Cloudflare cleanly and then fail every login, so the check has to fire
+    // before the value ships rather than at the door.
+    const salt = '0123456789abcdef0123456789abcdef';
+    const digest = 'a'.repeat(64);
+    expect(describeCredentialProblem(undefined)).toContain('缺失');
+    expect(describeCredentialProblem('')).toContain('缺失');
+    expect(describeCredentialProblem(`pbkdf2-sha256$210000$${salt}$${digest}`)).toContain('无法校验');
+    expect(describeCredentialProblem(`pbkdf2-sha256$1$${salt}$${digest}`)).toContain('无法校验');
+    expect(describeCredentialProblem(`pbkdf2-sha256$100000$${salt}$${digest}`)).toBeNull();
   });
 });

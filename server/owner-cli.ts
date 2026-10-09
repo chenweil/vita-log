@@ -1,6 +1,8 @@
 import { randomBytes, scryptSync } from 'node:crypto';
 import { resolve } from 'node:path';
 import { createOwnerCredential } from '../functions/_lib/owner-credentials';
+import { describeCredentialProblem } from '../functions/_lib/password';
+import { describePasswordProblem, MIN_PASSWORD_LENGTH } from './credential-policy';
 import { SqliteStore } from './store';
 
 /**
@@ -23,6 +25,7 @@ const USAGE = [
   '  npm run owner -- sqlite-set <username>            预置或轮换本机 SQLite 的本人账号',
   '',
   '密码从 VITA_OWNER_PASSWORD 环境变量或标准输入读取，不接受命令行参数。',
+  `密码至少 ${MIN_PASSWORD_LENGTH} 个字符，且不得是明显的低熵串或常见弱口令。`,
   '示例：printf %s "$NEW_PASSWORD" | npm run owner -- sqlite-set owner',
 ].join('\n');
 
@@ -30,8 +33,8 @@ const USAGE = [
 // has to keep implausible input out of the KDF. This one is a policy for
 // credentials being created after a published one was treated as exposed, so it
 // is deliberately stricter — and deliberately not raised at login, which would
-// lock out an existing owner rather than protect a new password.
-const MIN_PASSWORD = 12;
+// lock out an existing owner rather than protect a new password. The rule itself
+// lives in credential-policy.ts so the deployment wizard applies the same one.
 
 async function readPassword(): Promise<string> {
   const fromEnvironment = process.env.VITA_OWNER_PASSWORD;
@@ -47,11 +50,11 @@ async function readPassword(): Promise<string> {
 }
 
 function assertUsable(password: string): void {
-  // The historical credential is considered exposed, so a short password is
-  // not something worth persisting. Refusing here is better than accepting it
-  // and forgetting that the value is guessable.
-  if (password.length < MIN_PASSWORD) throw new Error(`密码至少需要 ${MIN_PASSWORD} 个字符`);
-  if (password.length > 1024) throw new Error('密码过长');
+  // The historical credential is considered exposed, so a weak password is not
+  // something worth persisting. Refusing here is better than accepting it and
+  // forgetting that the value is guessable.
+  const problem = describePasswordProblem(password);
+  if (problem) throw new Error(problem);
 }
 
 const [command, username, ...extra] = process.argv.slice(2);
@@ -63,7 +66,14 @@ try {
     if (username) throw new Error(`不接受额外参数；密码只能来自 VITA_OWNER_PASSWORD 或标准输入。\n${USAGE}`);
     const password = await readPassword();
     assertUsable(password);
-    console.log(await createOwnerCredential(password));
+    const credential = await createOwnerCredential(password);
+    // Never print a credential the deployment would refuse. Finding out after
+    // pasting it into Cloudflare means deploying and locking the site in the
+    // same step, and the login route cannot tell the owner which of the two
+    // problems they have.
+    const problem = describeCredentialProblem(credential);
+    if (problem) throw new Error(problem);
+    console.log(credential);
     console.error('\n把上面这一行写入 Cloudflare Secret：wrangler pages secret put VITA_LOG_OWNER_CREDENTIAL');
   } else if (command === 'sqlite-set' && username) {
     if (extra.length > 0) throw new Error(`不接受额外参数；密码只能来自 VITA_OWNER_PASSWORD 或标准输入。\n${USAGE}`);

@@ -1,4 +1,4 @@
-import { createCredential, verifyPassword } from './password';
+import { createCredential, CredentialUnusableError, describeCredentialProblem, verifyPassword } from './password';
 
 /**
  * The owner credential comes from the deployment, never from a request.
@@ -12,7 +12,11 @@ import { createCredential, verifyPassword } from './password';
  */
 export interface OwnerEnv {
   VITA_LOG_OWNER_USERNAME?: string;
-  /** Encoded `pbkdf2-sha256$<iterations>$<salt>$<digest>`; see password.ts. */
+  /**
+   * Encoded `pbkdf2-sha256$<iterations>$<salt>$<digest>`; see password.ts.
+   * The iteration field is not a dial: exactly one value passes the parse today,
+   * so this Secret cannot be used to tune the cost. See parseCredential.
+   */
   VITA_LOG_OWNER_CREDENTIAL?: string;
 }
 
@@ -31,16 +35,34 @@ export async function createOwnerCredential(password: string): Promise<string> {
 /**
  * Check submitted credentials against the deployment secret.
  *
- * Every failure — wrong username, wrong password, missing secret, corrupt
- * secret — is the same false. Collapsing them keeps a probe from learning
- * whether the deployment is configured at all, which is internal state the
- * public read path already refuses to expose.
+ * Every outcome of a *submission* is one boolean: there is deliberately no
+ * "no such user" result, so a probe cannot enumerate usernames, and a wrong
+ * password is indistinguishable from a wrong username. That still holds.
+ *
+ * What is no longer collapsed is a deployment that cannot verify anything at all.
+ * A missing Secret, or a credential whose format or cost the runtime refuses,
+ * fails identically for every input including the correct one. Reporting that as
+ * "账号或密码错误" sends the owner to change a password that was never the
+ * problem, and invites retries that cannot succeed — so it is raised instead and
+ * the login route says what is actually wrong.
+ *
+ * The cost of that choice is one bit of deployment state visible to an
+ * unauthenticated caller: that this deployment's credential is unusable. It is
+ * worth paying. Nothing is reachable either way — no session is issued, and the
+ * public read path is public regardless — while without it the owner of a
+ * misconfigured deployment has no signal at all, because every self-service
+ * remedy they can think of (another password, another session, a restart) is
+ * aimed at the wrong thing.
  */
 export async function verifyOwnerCredentials(env: OwnerEnv, username: unknown, password: unknown): Promise<boolean> {
   if (typeof username !== 'string' || typeof password !== 'string') return false;
+
   const expectedUser = env.VITA_LOG_OWNER_USERNAME;
   const credential = env.VITA_LOG_OWNER_CREDENTIAL;
-  if (!expectedUser || !credential) return false;
+  if (!expectedUser) throw new CredentialUnusableError('部署缺少 VITA_LOG_OWNER_USERNAME');
+  const problem = describeCredentialProblem(credential);
+  if (problem) throw new CredentialUnusableError(problem);
+
   if (username.trim() !== expectedUser.trim()) {
     // Still spend the KDF so a wrong username is not distinguishable by timing.
     await verifyPassword(password, credential);

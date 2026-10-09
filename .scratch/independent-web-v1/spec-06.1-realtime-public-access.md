@@ -66,7 +66,7 @@ Status: ready-for-agent
 
 ### Password, session and request security
 
-- 密码摘要使用 Web Crypto PBKDF2-HMAC-SHA-256，210,000 次迭代，保存独立盐、迭代次数和摘要。
+- 密码摘要使用 Web Crypto PBKDF2-HMAC-SHA-256，100,000 次迭代（平台硬上限，任何套餐不放行更高值），保存独立盐、迭代次数和摘要。迭代数超过上限的凭据必须在本机解析阶段被拒，不能留给平台在请求时拒绝。
 - 编辑会话 30 分钟绝对过期；锁定和注销立即撤销服务端会话。
 - 会话 Cookie 必须使用 `HttpOnly`、`Secure`、`SameSite=Strict`。
 - 写请求强制检查 `Origin/Host`，不开放跨域 CORS。

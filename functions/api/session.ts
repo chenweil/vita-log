@@ -1,6 +1,7 @@
 import { ApiError, noStore, readJsonBody, requireSameOrigin, unauthorized, type ApiErrorCode, type FunctionContext } from '../_lib/api';
 import { accountKey, addressKey, clientIp, consume, LOGIN_ATTEMPTS, reset } from '../_lib/rate-limit';
 import { verifyOwnerCredentials } from '../_lib/owner-credentials';
+import { CredentialUnusableError } from '../_lib/password';
 import { D1UnavailableError, readHealthStateVersion } from '../_lib/d1-store';
 import {
   clearSessionCookie, openSession, randomSessionToken, readSessionToken, resolveSession, revokeSession,
@@ -102,6 +103,20 @@ export async function guard(run: () => Promise<Response>): Promise<Response> {
     return await run();
   } catch (error) {
     if (error instanceof ApiError) return noStore({ code: error.code, message: error.message }, error.status);
+    // A deployment that cannot verify anyone is a defect, not an outage. It must
+    // not borrow the "请稍后重试" wording every other 503 here uses: retrying
+    // cannot fix it, and the owner following that advice waits forever while the
+    // real defect sits in the credential Secret. The literal reason is logged
+    // rather than returned, because an unauthenticated caller has no business
+    // learning this deployment's KDF parameters.
+    //
+    // The code stays `database-unavailable`: the five codes are a closed
+    // contract, and what the client needs from the code is only the "the service
+    // is broken, not your password" category. The message carries the specifics.
+    if (error instanceof CredentialUnusableError) {
+      console.error('本人凭据无法校验：', error.message, error.cause instanceof Error ? error.cause.message : error.cause);
+      return noStore({ code: 'database-unavailable', message: '本人凭据无法在当前环境校验，请核对部署 Secret 中的账号与凭据配置' }, 503);
+    }
     return noStore({ code: 'database-unavailable', message: '健康数据服务暂时不可用，请稍后重试' }, 503);
   }
 }

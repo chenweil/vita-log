@@ -26,7 +26,7 @@ import { SqliteD1 } from './support/sqlite-d1';
 
 const OWNER = 'owner';
 const PASSWORD = 'a sufficiently long owner password';
-// PBKDF2 at 210,000 iterations is the expensive part of the suite. Derive the
+// PBKDF2 at 100,000 iterations is the expensive part of the suite. Derive the
 // deployment secret once, the way ops does, rather than once per case.
 const CREDENTIAL = await createOwnerCredential(PASSWORD);
 
@@ -112,7 +112,7 @@ const openPage = (runtime: CloudflareRuntime, options: PageOptions = {}): Page =
  * Let the page finish its current work.
  *
  * Counting turns is not sound here, and that is a property of the code under
- * test rather than of the test: logging in runs 210,000 PBKDF2 iterations,
+ * test rather than of the test: logging in runs 100,000 PBKDF2 iterations,
  * which resolve on a real macrotask and take ~25ms. A dozen `setTimeout(0)`
  * turns span about a dozen milliseconds, so they returned while the login was
  * still in flight — and every assertion after that would have been testing a
