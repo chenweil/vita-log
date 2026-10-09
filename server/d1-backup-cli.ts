@@ -1,7 +1,6 @@
-import { lstatSync, readFileSync } from 'node:fs';
-import { isRecord } from '../src/domain';
 import { backupTo, readBackupFile, restoreFromFile } from './d1-backup';
 import { createOwnerBackupClient } from './d1-backup-transport';
+import { readOwnerFile } from './d1-owner-file';
 
 const usage = '用法：npm run d1:backup -- backup|restore --origin https://域名 --credentials /受限目录/credentials.json --directory /受限备份目录 [--file 备份文件 --expected-version N --confirm]';
 
@@ -21,11 +20,8 @@ async function main(): Promise<void> {
   const credentialsPath = options.get('--credentials');
   const directory = options.get('--directory');
   if (!originValue || !credentialsPath || !directory || !['backup', 'restore'].includes(command)) throw new Error(usage);
-  const info = lstatSync(credentialsPath);
-  if (!info.isFile() || (info.mode & 0o777) !== 0o600) throw new Error('凭据必须来自权限为 0600 的真实文件');
-  const credentials: unknown = JSON.parse(readFileSync(credentialsPath, 'utf8'));
-  if (!isRecord(credentials) || typeof credentials.username !== 'string' || typeof credentials.password !== 'string') throw new Error('凭据文件无效');
-  const owner = await createOwnerBackupClient(originValue, { username: credentials.username, password: credentials.password });
+  const credentials = readOwnerFile(credentialsPath);
+  const owner = await createOwnerBackupClient(originValue, credentials, globalThis, credentials.access);
   try {
     const client = owner.api;
     if (command === 'backup') {

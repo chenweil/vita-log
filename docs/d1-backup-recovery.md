@@ -30,6 +30,8 @@
 
 在仓库之外准备权限 0700 的真实目录；凭据 JSON 是权限 0600 的真实文件，只包含 `username` 和 `password`。不要提交凭据、健康数据或备份。密码不出现在命令参数和日志里，Cookie 只留在进程内存中，命令结束会向服务端注销。
 
+部署隔离阶段的 Cloudflare Access 服务身份可在同一受限文件追加成对的 `accessClientId`、`accessClientSecret`；本机会话客户端仅向相同 HTTPS origin 发送这些请求头，拒绝跨域和重定向。Access 身份不能替代应用本人会话。配置流程见 [Cloudflare 切换指南](cloudflare-cutover.md)。
+
 ```sh
 npm run d1:backup -- backup \
   --origin https://vita.example \
